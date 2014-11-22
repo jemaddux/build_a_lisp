@@ -1,5 +1,10 @@
 #include <stdio.h>
 
+int add_together(int x, int y){
+  int result = x + y;
+  return result;
+}
+
 int main(int argc, char** argv){
   puts("Hello, turtles");
 
@@ -22,17 +27,24 @@ int main(int argc, char** argv){
   int number = 42;
   // Or just
   int another_number;
+  another_number = 50;
   // If we don't want to set the value of the int
   // A few built in types:
   // void  // Empty type
   char last_initial = 'M'; // Single Character/byte
+  last_initial = 'P';
   int a_third_number = 13;
+  a_third_number = 12;
   long a_big_int = 123456789012345;
+  a_big_int /= 2;
   float another_derp = 0.433;
+  another_derp *= 3;
   double a_bigger_float = 0.12341332;
+  a_bigger_float -= 0.2;
 
-
-
+  int result = add_together(number, a_third_number);
+  result += 3;
 
   return 0;
 }
+
