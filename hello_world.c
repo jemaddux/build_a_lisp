@@ -5,6 +5,28 @@ int add_together(int x, int y){
   return result;
 }
 
+// Structures are new types of data. like so:
+typedef struct{
+  float x;
+  float y;
+} point;
+// This created a new data type called point that is a collection of a x and y
+// int in 2d space
+// To use it:
+point p;
+p.x = 0.1;
+p.y = 10.0;
+// It looks like we know the internals of the point. Interesting.
+float length = sqrt(p.x * p.x + p.y * p.y);
+
+// Pointers are a slightly different verrsion of a normal type that is declared
+// by adding as asterisk like so: int* some_int;
+// Book says not to worry about what they are right now but they are useful
+// for strings or lists. For example strings in C are declared by the pointer
+// type char* which is a list of characters (A string, duh). Strings can
+// also be declared litterally with "double qutoes"
+
+
 int main(int argc, char** argv){
   puts("Hello, turtles");
 
