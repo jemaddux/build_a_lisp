@@ -1,13894 +1,3221 @@
+#include "mpc.h"
 
+/*
+** State Type
+*/
 
+static mpc_state_t mpc_state_invalid(void) {
+  mpc_state_t s;
+  s.pos = -1;
+  s.row = -1;
+  s.col = -1;
+  return s;
+}
 
+static mpc_state_t mpc_state_new(void) {
+  mpc_state_t s;
+  s.pos = 0;
+  s.row = 0;
+  s.col = 0;
+  return s;
+}
 
-<!DOCTYPE html>
-<html lang="en" class="">
-  <head prefix="og: http://ogp.me/ns# fb: http://ogp.me/ns/fb# object: http://ogp.me/ns/object# article: http://ogp.me/ns/article# profile: http://ogp.me/ns/profile#">
-    <meta charset='utf-8'>
-    <meta http-equiv="X-UA-Compatible" content="IE=edge">
-    <meta http-equiv="Content-Language" content="en">
+static mpc_state_t *mpc_state_copy(mpc_state_t s) {
+  mpc_state_t *r = malloc(sizeof(mpc_state_t));
+  memcpy(r, &s, sizeof(mpc_state_t));
+  return r;
+}
+
+/*
+** Error Type
+*/
+
+static mpc_err_t *mpc_err_new(const char *filename, mpc_state_t s, const char *expected, char recieved) {
+  mpc_err_t *x = malloc(sizeof(mpc_err_t));
+  x->filename = malloc(strlen(filename) + 1);
+  strcpy(x->filename, filename);
+  x->state = s;
+  x->expected_num = 1;
+  x->expected = malloc(sizeof(char*));
+  x->expected[0] = malloc(strlen(expected) + 1);
+  strcpy(x->expected[0], expected);
+  x->failure = NULL;
+  x->recieved = recieved;
+  return x;
+}
+
+static mpc_err_t *mpc_err_fail(const char *filename, mpc_state_t s, const char *failure) {
+  mpc_err_t *x = malloc(sizeof(mpc_err_t));
+  x->filename = malloc(strlen(filename) + 1);
+  strcpy(x->filename, filename);
+  x->state = s;
+  x->expected_num = 0;
+  x->expected = NULL;
+  x->failure = malloc(strlen(failure) + 1);
+  strcpy(x->failure, failure);
+  x->recieved = ' ';
+  return x;
+}
+
+void mpc_err_delete(mpc_err_t *x) {
+
+  int i;
+  for (i = 0; i < x->expected_num; i++) {
+    free(x->expected[i]);
+  }
+  
+  free(x->expected);
+  free(x->filename);
+  free(x->failure);
+  free(x);
+}
+
+static int mpc_err_contains_expected(mpc_err_t *x, char *expected) {
+  
+  int i;
+  for (i = 0; i < x->expected_num; i++) {
+    if (strcmp(x->expected[i], expected) == 0) { return 1; }
+  }
+  
+  return 0;
+}
+
+static void mpc_err_add_expected(mpc_err_t *x, char *expected) {
+  
+  x->expected_num++;
+  x->expected = realloc(x->expected, sizeof(char*) * x->expected_num);
+  x->expected[x->expected_num-1] = malloc(strlen(expected) + 1);
+  strcpy(x->expected[x->expected_num-1], expected);
+  
+}
+
+static void mpc_err_clear_expected(mpc_err_t *x, char *expected) {
+  
+  int i;
+  for (i = 0; i < x->expected_num; i++) {
+    free(x->expected[i]);
+  }
+  x->expected_num = 1;
+  x->expected = realloc(x->expected, sizeof(char*) * x->expected_num);
+  x->expected[0] = malloc(strlen(expected) + 1);
+  strcpy(x->expected[0], expected);
+  
+}
+
+void mpc_err_print(mpc_err_t *x) {
+  mpc_err_print_to(x, stdout);
+}
+
+void mpc_err_print_to(mpc_err_t *x, FILE *f) {
+  char *str = mpc_err_string(x);
+  fprintf(f, "%s", str);
+  free(str);
+}
+
+void mpc_err_string_cat(char *buffer, int *pos, int *max, char const *fmt, ...) {
+  /* TODO: Error Checking on Length */
+  int left = ((*max) - (*pos));
+  va_list va;
+  va_start(va, fmt);
+  if (left < 0) { left = 0;}
+  (*pos) += vsprintf(buffer + (*pos), fmt, va);
+  va_end(va);
+}
+
+static char char_unescape_buffer[3];
+
+static const char *mpc_err_char_unescape(char c) {
+  
+  char_unescape_buffer[0] = '\'';
+  char_unescape_buffer[1] = ' ';
+  char_unescape_buffer[2] = '\'';
+  
+  switch (c) {
     
+    case '\a': return "bell";
+    case '\b': return "backspace";
+    case '\f': return "formfeed";
+    case '\r': return "carriage return";
+    case '\v': return "vertical tab";
+    case '\0': return "end of input";
+    case '\n': return "newline";
+    case '\t': return "tab";
+    case ' ' : return "space";
+    default:
+      char_unescape_buffer[1] = c;
+      return char_unescape_buffer;
+  }
+  
+}
+
+char *mpc_err_string(mpc_err_t *x) {
+  
+  char *buffer = calloc(1, 1024);
+  int max = 1023;
+  int pos = 0; 
+  int i;
+  
+  if (x->failure) {
+    mpc_err_string_cat(buffer, &pos, &max,
+    "%s: error: %s\n", x->filename, x->failure);
+    return buffer;
+  }
+  
+  mpc_err_string_cat(buffer, &pos, &max, 
+    "%s:%i:%i: error: expected ", x->filename, x->state.row+1, x->state.col+1);
+  
+  if (x->expected_num == 0) { mpc_err_string_cat(buffer, &pos, &max, "ERROR: NOTHING EXPECTED"); }
+  if (x->expected_num == 1) { mpc_err_string_cat(buffer, &pos, &max, "%s", x->expected[0]); }
+  if (x->expected_num >= 2) {
+  
+    for (i = 0; i < x->expected_num-2; i++) {
+      mpc_err_string_cat(buffer, &pos, &max, "%s, ", x->expected[i]);
+    } 
     
-    <title>mpc/mpc.c at master · orangeduck/mpc</title>
-    <link rel="search" type="application/opensearchdescription+xml" href="/opensearch.xml" title="GitHub">
-    <link rel="fluid-icon" href="https://github.com/fluidicon.png" title="GitHub">
-    <link rel="apple-touch-icon" sizes="57x57" href="/apple-touch-icon-114.png">
-    <link rel="apple-touch-icon" sizes="114x114" href="/apple-touch-icon-114.png">
-    <link rel="apple-touch-icon" sizes="72x72" href="/apple-touch-icon-144.png">
-    <link rel="apple-touch-icon" sizes="144x144" href="/apple-touch-icon-144.png">
-    <meta property="fb:app_id" content="1401488693436528">
+    mpc_err_string_cat(buffer, &pos, &max, "%s or %s", 
+      x->expected[x->expected_num-2], 
+      x->expected[x->expected_num-1]);
+  }
+  
+  mpc_err_string_cat(buffer, &pos, &max, " at ");
+  mpc_err_string_cat(buffer, &pos, &max, mpc_err_char_unescape(x->recieved));
+  mpc_err_string_cat(buffer, &pos, &max, "\n");
+  
+  return realloc(buffer, strlen(buffer) + 1);
+}
 
-      <meta content="@github" name="twitter:site" /><meta content="summary" name="twitter:card" /><meta content="orangeduck/mpc" name="twitter:title" /><meta content="mpc - A Parser Combinator library for C" name="twitter:description" /><meta content="https://avatars2.githubusercontent.com/u/177299?v=3&amp;s=400" name="twitter:image:src" />
-<meta content="GitHub" property="og:site_name" /><meta content="object" property="og:type" /><meta content="https://avatars2.githubusercontent.com/u/177299?v=3&amp;s=400" property="og:image" /><meta content="orangeduck/mpc" property="og:title" /><meta content="https://github.com/orangeduck/mpc" property="og:url" /><meta content="mpc - A Parser Combinator library for C" property="og:description" />
-
-      <meta name="browser-stats-url" content="/_stats">
-    <link rel="assets" href="https://assets-cdn.github.com/">
-    <link rel="conduit-xhr" href="https://ghconduit.com:25035">
-    <link rel="xhr-socket" href="/_sockets">
-    <meta name="pjax-timeout" content="1000">
-    <link rel="sudo-modal" href="/sessions/sudo_modal">
-
-    <meta name="msapplication-TileImage" content="/windows-tile.png">
-    <meta name="msapplication-TileColor" content="#ffffff">
-    <meta name="selected-link" value="repo_source" data-pjax-transient>
-      <meta name="google-analytics" content="UA-3769691-2">
-
-    <meta content="collector.githubapp.com" name="octolytics-host" /><meta content="collector-cdn.github.com" name="octolytics-script-host" /><meta content="github" name="octolytics-app-id" /><meta content="4C14FAB7:706B:10442061:54726350" name="octolytics-dimension-request_id" /><meta content="1317337" name="octolytics-actor-id" /><meta content="jemaddux" name="octolytics-actor-login" /><meta content="f50ebc4aae63821d86ffa1f756898f5b575213c9da595e65d78b37e0843f157b" name="octolytics-actor-hash" />
+static mpc_err_t *mpc_err_or(mpc_err_t** x, int n) {
+  
+  int i, j;
+  mpc_err_t *e = malloc(sizeof(mpc_err_t));
+  e->state = mpc_state_invalid();
+  e->expected_num = 0;
+  e->expected = NULL;
+  e->failure = NULL;
+  e->filename = malloc(strlen(x[0]->filename)+1);
+  strcpy(e->filename, x[0]->filename);
+  
+  for (i = 0; i < n; i++) {
+    if (x[i]->state.pos > e->state.pos) { e->state = x[i]->state; }
+  }
+  
+  for (i = 0; i < n; i++) {
     
-    <meta content="Rails, view, blob#show" name="analytics-event" />
-
+    if (x[i]->state.pos < e->state.pos) { continue; }
     
+    if (x[i]->failure) {
+      e->failure = malloc(strlen(x[i]->failure)+1);
+      strcpy(e->failure, x[i]->failure);
+      break;
+    }
     
-    <link rel="icon" type="image/x-icon" href="https://assets-cdn.github.com/favicon.ico">
-
-
-    <meta content="authenticity_token" name="csrf-param" />
-<meta content="1UQ16FZU0EKAG/z0mO+JvNf3z3Qbz4DL7r0UEX8LZuyWWh7OijLXlhB7AK2lkRSnC7Xl74JKHjK5g62b+8gSeg==" name="csrf-token" />
-
-    <link href="https://assets-cdn.github.com/assets/github-fa9b8c5d848205db514d4097d2b78f4528d01a79f39601e0f9c5c40ed6894711.css" media="all" rel="stylesheet" type="text/css" />
-    <link href="https://assets-cdn.github.com/assets/github2-e48cf9f7b34f2138837ae8f236223b114441dde478e265f64e1ad9bf6bd76afd.css" media="all" rel="stylesheet" type="text/css" />
+    e->recieved = x[i]->recieved;
     
+    for (j = 0; j < x[i]->expected_num; j++) {
+      if (!mpc_err_contains_expected(e, x[i]->expected[j])) { mpc_err_add_expected(e, x[i]->expected[j]); }
+    }
+  }
+  
+  for (i = 0; i < n; i++) {
+    mpc_err_delete(x[i]);
+  }
+  
+  return e;
+}
+
+static mpc_err_t *mpc_err_repeat(mpc_err_t *x, const char *prefix) {
+
+  int i;
+  char *expect = malloc(strlen(prefix) + 1);
+  strcpy(expect, prefix);
+  
+  if (x->expected_num == 1) {
+    expect = realloc(expect, strlen(expect) + strlen(x->expected[0]) + 1);
+    strcat(expect, x->expected[0]);
+  }
+  
+  if (x->expected_num > 1) {
+  
+    for (i = 0; i < x->expected_num-2; i++) {
+      expect = realloc(expect, strlen(expect) + strlen(x->expected[i]) + strlen(", ") + 1);
+      strcat(expect, x->expected[i]);
+      strcat(expect, ", ");
+    }
     
+    expect = realloc(expect, strlen(expect) + strlen(x->expected[x->expected_num-2]) + strlen(" or ") + 1);
+    strcat(expect, x->expected[x->expected_num-2]);
+    strcat(expect, " or ");
+    expect = realloc(expect, strlen(expect) + strlen(x->expected[x->expected_num-1]) + 1);
+    strcat(expect, x->expected[x->expected_num-1]);
 
+  }
+  
+  mpc_err_clear_expected(x, expect);
+  free(expect);
+  
+  return x;
 
-    <meta http-equiv="x-pjax-version" content="a3ac1570158331332f4e32c9da80623c">
+}
 
+static mpc_err_t *mpc_err_many1(mpc_err_t *x) {
+  return mpc_err_repeat(x, "one or more of ");
+}
+
+static mpc_err_t *mpc_err_count(mpc_err_t *x, int n) {
+  mpc_err_t *y;
+  int digits = n/10 + 1;
+  char *prefix = malloc(digits + strlen(" of ") + 1);
+  sprintf(prefix, "%i of ", n);
+  y = mpc_err_repeat(x, prefix);
+  free(prefix);
+  return y;
+}
+
+/*
+** Input Type
+*/
+
+/*
+** In mpc the input type has three modes of 
+** operation: String, File and Pipe.
+**
+** String is easy. The whole contents are 
+** loaded into a buffer and scanned through.
+** The cursor can jump around at will making 
+** backtracking easy.
+**
+** The second is a File which is also somewhat
+** easy. The contents are never loaded into 
+** memory but backtracking can still be achieved
+** by seeking in the file at different positions.
+**
+** The final mode is Pipe. This is the difficult
+** one. As we assume pipes cannot be seeked - and 
+** only support a single character lookahead at 
+** any point, when the input is marked for a 
+** potential backtracking we start buffering any 
+** input.
+**
+** This means that if we are requested to seek
+** back we can simply start reading from the
+** buffer instead of the input.
+**
+** Of course using `mpc_predictive` will disable
+** backtracking and make LL(1) grammars easy
+** to parse for all input methods.
+**
+*/
+
+enum {
+  MPC_INPUT_STRING = 0,
+  MPC_INPUT_FILE   = 1,
+  MPC_INPUT_PIPE   = 2
+};
+
+typedef struct {
+
+  int type;
+  char *filename;  
+  mpc_state_t state;
+  
+  char *string;
+  char *buffer;
+  FILE *file;
+  
+  int backtrack;
+  int marks_num;
+  mpc_state_t* marks;
+  char* lasts;
+  
+  char last;
+  
+} mpc_input_t;
+
+static mpc_input_t *mpc_input_new_string(const char *filename, const char *string) {
+
+  mpc_input_t *i = malloc(sizeof(mpc_input_t));
+  
+  i->filename = malloc(strlen(filename) + 1);
+  strcpy(i->filename, filename);
+  i->type = MPC_INPUT_STRING;
+  
+  i->state = mpc_state_new();
+  
+  i->string = malloc(strlen(string) + 1);
+  strcpy(i->string, string);
+  i->buffer = NULL;
+  i->file = NULL;
+  
+  i->backtrack = 1;
+  i->marks_num = 0;
+  i->marks = NULL;
+  i->lasts = NULL;
+
+  i->last = '\0';
+  
+  return i;
+}
+
+static mpc_input_t *mpc_input_new_pipe(const char *filename, FILE *pipe) {
+
+  mpc_input_t *i = malloc(sizeof(mpc_input_t));
+  
+  i->filename = malloc(strlen(filename) + 1);
+  strcpy(i->filename, filename);
+  
+  i->type = MPC_INPUT_PIPE;
+  i->state = mpc_state_new();
+  
+  i->string = NULL;
+  i->buffer = NULL;
+  i->file = pipe;
+  
+  i->backtrack = 1;
+  i->marks_num = 0;
+  i->marks = NULL;
+  i->lasts = NULL;
+  
+  i->last = '\0';
+  
+  return i;
+  
+}
+
+static mpc_input_t *mpc_input_new_file(const char *filename, FILE *file) {
+  
+  mpc_input_t *i = malloc(sizeof(mpc_input_t));
+  
+  i->filename = malloc(strlen(filename) + 1);
+  strcpy(i->filename, filename);
+  i->type = MPC_INPUT_FILE;
+  i->state = mpc_state_new();
+  
+  i->string = NULL;
+  i->buffer = NULL;
+  i->file = file;
+  
+  i->backtrack = 1;
+  i->marks_num = 0;
+  i->marks = NULL;
+  i->lasts = NULL;
+  
+  i->last = '\0';
+  
+  return i;
+}
+
+static void mpc_input_delete(mpc_input_t *i) {
+  
+  free(i->filename);
+  
+  if (i->type == MPC_INPUT_STRING) { free(i->string); }
+  if (i->type == MPC_INPUT_PIPE) { free(i->buffer); }
+  
+  free(i->marks);
+  free(i->lasts);
+  free(i);
+}
+
+static void mpc_input_backtrack_disable(mpc_input_t *i) { i->backtrack--; }
+static void mpc_input_backtrack_enable(mpc_input_t *i) { i->backtrack++; }
+
+static void mpc_input_mark(mpc_input_t *i) {
+  
+  if (i->backtrack < 1) { return; }
+  
+  i->marks_num++;
+  i->marks = realloc(i->marks, sizeof(mpc_state_t) * i->marks_num);
+  i->lasts = realloc(i->lasts, sizeof(char) * i->marks_num);
+  i->marks[i->marks_num-1] = i->state;
+  i->lasts[i->marks_num-1] = i->last;
+  
+  if (i->type == MPC_INPUT_PIPE && i->marks_num == 1) {
+    i->buffer = calloc(1, 1);
+  }
+  
+}
+
+static void mpc_input_unmark(mpc_input_t *i) {
+  
+  if (i->backtrack < 1) { return; }
+  
+  i->marks_num--;
+  i->marks = realloc(i->marks, sizeof(mpc_state_t) * i->marks_num);
+  i->lasts = realloc(i->lasts, sizeof(char) * i->marks_num);
+  
+  if (i->type == MPC_INPUT_PIPE && i->marks_num == 0) {
+    free(i->buffer);
+    i->buffer = NULL;
+  }
+  
+}
+
+static void mpc_input_rewind(mpc_input_t *i) {
+  
+  if (i->backtrack < 1) { return; }
+  
+  i->state = i->marks[i->marks_num-1];
+  i->last  = i->lasts[i->marks_num-1];
+  
+  if (i->type == MPC_INPUT_FILE) {
+    fseek(i->file, i->state.pos, SEEK_SET);
+  }
+  
+  mpc_input_unmark(i);
+}
+
+static int mpc_input_buffer_in_range(mpc_input_t *i) {
+  return i->state.pos < (long)(strlen(i->buffer) + i->marks[0].pos);
+}
+
+static char mpc_input_buffer_get(mpc_input_t *i) {
+  return i->buffer[i->state.pos - i->marks[0].pos];
+}
+
+static int mpc_input_terminated(mpc_input_t *i) {
+  if (i->type == MPC_INPUT_STRING && i->state.pos == (long)strlen(i->string)) { return 1; }
+  if (i->type == MPC_INPUT_FILE && feof(i->file)) { return 1; }
+  if (i->type == MPC_INPUT_PIPE && feof(i->file)) { return 1; }
+  return 0;
+}
+
+static char mpc_input_getc(mpc_input_t *i) {
+  
+  char c = '\0';
+  
+  switch (i->type) {
+    
+    case MPC_INPUT_STRING: return i->string[i->state.pos];
+    case MPC_INPUT_FILE: c = fgetc(i->file); return c;
+    case MPC_INPUT_PIPE:
+    
+      if (!i->buffer) { c = getc(i->file); return c; }
       
-  <meta name="description" content="mpc - A Parser Combinator library for C">
-  <meta name="go-import" content="github.com/orangeduck/mpc git https://github.com/orangeduck/mpc.git">
-
-  <meta content="177299" name="octolytics-dimension-user_id" /><meta content="orangeduck" name="octolytics-dimension-user_login" /><meta content="13122868" name="octolytics-dimension-repository_id" /><meta content="orangeduck/mpc" name="octolytics-dimension-repository_nwo" /><meta content="true" name="octolytics-dimension-repository_public" /><meta content="false" name="octolytics-dimension-repository_is_fork" /><meta content="13122868" name="octolytics-dimension-repository_network_root_id" /><meta content="orangeduck/mpc" name="octolytics-dimension-repository_network_root_nwo" />
-  <link href="https://github.com/orangeduck/mpc/commits/master.atom" rel="alternate" title="Recent Commits to mpc:master" type="application/atom+xml">
-
-  </head>
-
-
-  <body class="logged_in  env-production macintosh vis-public page-blob">
-    <a href="#start-of-content" tabindex="1" class="accessibility-aid js-skip-to-content">Skip to content</a>
-    <div class="wrapper">
-      
-      
-      
-      
-
-
-      <div class="header header-logged-in true" role="banner">
-  <div class="container clearfix">
-
-    <a class="header-logo-invertocat" href="https://github.com/" data-hotkey="g d" aria-label="Homepage" ga-data-click="Header, go to dashboard, icon:logo">
-  <span class="mega-octicon octicon-mark-github"></span>
-</a>
-
-
-      <div class="site-search repo-scope js-site-search" role="search">
-          <form accept-charset="UTF-8" action="/orangeduck/mpc/search" class="js-site-search-form" data-global-search-url="/search" data-repo-search-url="/orangeduck/mpc/search" method="get"><div style="margin:0;padding:0;display:inline"><input name="utf8" type="hidden" value="&#x2713;" /></div>
-  <input type="text"
-    class="js-site-search-field is-clearable"
-    data-hotkey="s"
-    name="q"
-    placeholder="Search"
-    data-global-scope-placeholder="Search GitHub"
-    data-repo-scope-placeholder="Search"
-    tabindex="1"
-    autocapitalize="off">
-  <div class="scope-badge">This repository</div>
-</form>
-      </div>
-      <ul class="header-nav left" role="navigation">
-        <li class="header-nav-item explore">
-          <a class="header-nav-link" href="/explore" data-ga-click="Header, go to explore, text:explore">Explore</a>
-        </li>
-          <li class="header-nav-item">
-            <a class="header-nav-link" href="https://gist.github.com" data-ga-click="Header, go to gist, text:gist">Gist</a>
-          </li>
-          <li class="header-nav-item">
-            <a class="header-nav-link" href="/blog" data-ga-click="Header, go to blog, text:blog">Blog</a>
-          </li>
-        <li class="header-nav-item">
-          <a class="header-nav-link" href="https://help.github.com" data-ga-click="Header, go to help, text:help">Help</a>
-        </li>
-      </ul>
-
+      if (i->buffer && mpc_input_buffer_in_range(i)) {
+        c = mpc_input_buffer_get(i);
+        return c;
+      } else {
+        c = getc(i->file);
+        return c;
+      }
     
-<ul class="header-nav user-nav right" id="user-links">
-  <li class="header-nav-item dropdown js-menu-container">
-    <a class="header-nav-link name" href="/jemaddux" data-ga-click="Header, go to profile, text:username">
-      <img alt="John Maddux" class="avatar" data-user="1317337" height="20" src="https://avatars1.githubusercontent.com/u/1317337?v=3&amp;s=40" width="20" />
-      <span class="css-truncate">
-        <span class="css-truncate-target">jemaddux</span>
-      </span>
-    </a>
-  </li>
+    default: return c;
+  }
+}
 
-  <li class="header-nav-item dropdown js-menu-container">
-    <a class="header-nav-link js-menu-target tooltipped tooltipped-s" href="#" aria-label="Create new..." data-ga-click="Header, create new, icon:add">
-      <span class="octicon octicon-plus"></span>
-      <span class="dropdown-caret"></span>
-    </a>
-
-    <div class="dropdown-menu-content js-menu-content">
+static char mpc_input_peekc(mpc_input_t *i) {
+  
+  char c = '\0';
+  
+  switch (i->type) {
+    case MPC_INPUT_STRING: return i->string[i->state.pos];
+    case MPC_INPUT_FILE: 
       
-<ul class="dropdown-menu">
-  <li>
-    <a href="/new"><span class="octicon octicon-repo"></span> New repository</a>
-  </li>
-  <li>
-    <a href="/organizations/new"><span class="octicon octicon-organization"></span> New organization</a>
-  </li>
-
-
-    <li class="dropdown-divider"></li>
-    <li class="dropdown-header">
-      <span title="orangeduck/mpc">This repository</span>
-    </li>
-      <li>
-        <a href="/orangeduck/mpc/issues/new"><span class="octicon octicon-issue-opened"></span> New issue</a>
-      </li>
-</ul>
-
-    </div>
-  </li>
-
-  <li class="header-nav-item">
-        <a href="/notifications" aria-label="You have no unread notifications" class="header-nav-link notification-indicator tooltipped tooltipped-s" data-ga-click="Header, go to notifications, icon:read" data-hotkey="g n">
-        <span class="mail-status all-read"></span>
-        <span class="octicon octicon-inbox"></span>
-</a>
-  </li>
-
-  <li class="header-nav-item">
-    <a class="header-nav-link tooltipped tooltipped-s" href="/settings/profile" id="account_settings" aria-label="Settings" data-ga-click="Header, go to settings, icon:settings">
-      <span class="octicon octicon-gear"></span>
-    </a>
-  </li>
-
-  <li class="header-nav-item">
-    <form accept-charset="UTF-8" action="/logout" class="logout-form" method="post"><div style="margin:0;padding:0;display:inline"><input name="utf8" type="hidden" value="&#x2713;" /><input name="authenticity_token" type="hidden" value="A9RqvJ6OhbFEZAIFR7EmBj5ksgWRkUtjcDSeGkbQTToxJIw7D5Ef88+uJsJkjhWI3cF83vDh1BpWaHPmd8vDTw==" /></div>
-      <button class="header-nav-link sign-out-button tooltipped tooltipped-s" aria-label="Sign out" data-ga-click="Header, sign out, icon:logout">
-        <span class="octicon octicon-sign-out"></span>
-      </button>
-</form>  </li>
-
-</ul>
-
-
+      c = fgetc(i->file);
+      if (feof(i->file)) { return '\0'; }
+      
+      fseek(i->file, -1, SEEK_CUR);
+      return c;
     
-  </div>
-</div>
-
+    case MPC_INPUT_PIPE:
       
+      if (!i->buffer) {
+        c = getc(i->file);
+        if (feof(i->file)) { return '\0'; }
+        ungetc(c, i->file);
+        return c;
+      }
+      
+      if (i->buffer && mpc_input_buffer_in_range(i)) {
+        return mpc_input_buffer_get(i);
+      } else {
+        c = getc(i->file);
+        if (feof(i->file)) { return '\0'; }
+        ungetc(c, i->file);
+        return c;
+      }
+    
+    default: return c;
+  }
+  
+}
 
+static int mpc_input_failure(mpc_input_t *i, char c) {
+
+  switch (i->type) {
+    case MPC_INPUT_STRING: { break; }
+    case MPC_INPUT_FILE: fseek(i->file, -1, SEEK_CUR); { break; }
+    case MPC_INPUT_PIPE: {
+      
+      if (!i->buffer) { ungetc(c, i->file); break; }
+      
+      if (i->buffer && mpc_input_buffer_in_range(i)) {
+        break;
+      } else {
+        ungetc(c, i->file); 
+      }
+    }
+    default: { break; }
+  }
+  return 0;
+}
+
+static int mpc_input_success(mpc_input_t *i, char c, char **o) {
+  
+  if (i->type == MPC_INPUT_PIPE &&
+      i->buffer &&
+      !mpc_input_buffer_in_range(i)) {
+    
+    i->buffer = realloc(i->buffer, strlen(i->buffer) + 2);
+    i->buffer[strlen(i->buffer) + 1] = '\0';
+    i->buffer[strlen(i->buffer) + 0] = c;
+  }
+  
+  i->last = c;
+  i->state.pos++;
+  i->state.col++;
+  
+  if (c == '\n') {
+    i->state.col = 0;
+    i->state.row++;
+  }
+  
+  if (o) {
+    (*o) = malloc(2);
+    (*o)[0] = c;
+    (*o)[1] = '\0';
+  }
+  
+  return 1;
+}
+
+static int mpc_input_any(mpc_input_t *i, char **o) {
+  char x = mpc_input_getc(i);
+  if (mpc_input_terminated(i)) { return 0; }
+  return mpc_input_success(i, x, o);
+}
+
+static int mpc_input_char(mpc_input_t *i, char c, char **o) {
+  char x = mpc_input_getc(i);
+  if (mpc_input_terminated(i)) { return 0; }
+  return x == c ? mpc_input_success(i, x, o) : mpc_input_failure(i, x);
+}
+
+static int mpc_input_range(mpc_input_t *i, char c, char d, char **o) {
+  char x = mpc_input_getc(i);
+  if (mpc_input_terminated(i)) { return 0; }
+  return x >= c && x <= d ? mpc_input_success(i, x, o) : mpc_input_failure(i, x);  
+}
+
+static int mpc_input_oneof(mpc_input_t *i, const char *c, char **o) {
+  char x = mpc_input_getc(i);
+  if (mpc_input_terminated(i)) { return 0; }
+  return strchr(c, x) != 0 ? mpc_input_success(i, x, o) : mpc_input_failure(i, x);  
+}
+
+static int mpc_input_noneof(mpc_input_t *i, const char *c, char **o) {
+  char x = mpc_input_getc(i);
+  if (mpc_input_terminated(i)) { return 0; }
+  return strchr(c, x) == 0 ? mpc_input_success(i, x, o) : mpc_input_failure(i, x);  
+}
+
+static int mpc_input_satisfy(mpc_input_t *i, int(*cond)(char), char **o) {
+  char x = mpc_input_getc(i);
+  if (mpc_input_terminated(i)) { return 0; }
+  return cond(x) ? mpc_input_success(i, x, o) : mpc_input_failure(i, x);  
+}
+
+static int mpc_input_string(mpc_input_t *i, const char *c, char **o) {
+  
+  char *co = NULL;
+  const char *x = c;
+
+  mpc_input_mark(i);
+  while (*x) {
+    if (mpc_input_char(i, *x, &co)) {
+      free(co);
+    } else {
+      mpc_input_rewind(i);
+      return 0;
+    }
+    x++;
+  }
+  mpc_input_unmark(i);
+  
+  *o = malloc(strlen(c) + 1);
+  strcpy(*o, c);
+  return 1;
+}
+
+static int mpc_input_anchor(mpc_input_t* i, int(*f)(char,char)) {
+  return f(i->last, mpc_input_peekc(i));
+}
+
+/*
+** Parser Type
+*/
+
+enum {
+  MPC_TYPE_UNDEFINED = 0,
+  MPC_TYPE_PASS      = 1,
+  MPC_TYPE_FAIL      = 2,
+  MPC_TYPE_LIFT      = 3,
+  MPC_TYPE_LIFT_VAL  = 4,
+  MPC_TYPE_EXPECT    = 5,
+  MPC_TYPE_ANCHOR    = 6,
+  MPC_TYPE_STATE     = 7,
+  
+  MPC_TYPE_ANY       = 8,
+  MPC_TYPE_SINGLE    = 9,
+  MPC_TYPE_ONEOF     = 10,
+  MPC_TYPE_NONEOF    = 11,
+  MPC_TYPE_RANGE     = 12,
+  MPC_TYPE_SATISFY   = 13,
+  MPC_TYPE_STRING    = 14,
+  
+  MPC_TYPE_APPLY     = 15,
+  MPC_TYPE_APPLY_TO  = 16,
+  MPC_TYPE_PREDICT   = 17,
+  MPC_TYPE_NOT       = 18,
+  MPC_TYPE_MAYBE     = 19,
+  MPC_TYPE_MANY      = 20,
+  MPC_TYPE_MANY1     = 21,
+  MPC_TYPE_COUNT     = 22,
+  
+  MPC_TYPE_OR        = 23,
+  MPC_TYPE_AND       = 24
+};
+
+typedef struct { char *m; } mpc_pdata_fail_t;
+typedef struct { mpc_ctor_t lf; void *x; } mpc_pdata_lift_t;
+typedef struct { mpc_parser_t *x; char *m; } mpc_pdata_expect_t;
+typedef struct { int(*f)(char,char); } mpc_pdata_anchor_t;
+typedef struct { char x; } mpc_pdata_single_t;
+typedef struct { char x; char y; } mpc_pdata_range_t;
+typedef struct { int(*f)(char); } mpc_pdata_satisfy_t;
+typedef struct { char *x; } mpc_pdata_string_t;
+typedef struct { mpc_parser_t *x; mpc_apply_t f; } mpc_pdata_apply_t;
+typedef struct { mpc_parser_t *x; mpc_apply_to_t f; void *d; } mpc_pdata_apply_to_t;
+typedef struct { mpc_parser_t *x; } mpc_pdata_predict_t;
+typedef struct { mpc_parser_t *x; mpc_dtor_t dx; mpc_ctor_t lf; } mpc_pdata_not_t;
+typedef struct { int n; mpc_fold_t f; mpc_parser_t *x; mpc_dtor_t dx; } mpc_pdata_repeat_t;
+typedef struct { int n; mpc_parser_t **xs; } mpc_pdata_or_t;
+typedef struct { int n; mpc_fold_t f; mpc_parser_t **xs; mpc_dtor_t *dxs;  } mpc_pdata_and_t;
+
+typedef union {
+  mpc_pdata_fail_t fail;
+  mpc_pdata_lift_t lift;
+  mpc_pdata_expect_t expect;
+  mpc_pdata_anchor_t anchor;
+  mpc_pdata_single_t single;
+  mpc_pdata_range_t range;
+  mpc_pdata_satisfy_t satisfy;
+  mpc_pdata_string_t string;
+  mpc_pdata_apply_t apply;
+  mpc_pdata_apply_to_t apply_to;
+  mpc_pdata_predict_t predict;
+  mpc_pdata_not_t not;
+  mpc_pdata_repeat_t repeat;
+  mpc_pdata_and_t and;
+  mpc_pdata_or_t or;
+} mpc_pdata_t;
+
+struct mpc_parser_t {
+  char retained;
+  char *name;
+  char type;
+  mpc_pdata_t data;
+};
+
+/*
+** Stack Type
+*/
+
+typedef struct {
+
+  int parsers_num;
+  int parsers_slots;
+  mpc_parser_t **parsers;
+  int *states;
+
+  int results_num;
+  int results_slots;
+  mpc_result_t *results;
+  int *returns;
+  
+  mpc_err_t *err;
+  
+} mpc_stack_t;
+
+static mpc_stack_t *mpc_stack_new(const char *filename) {
+  mpc_stack_t *s = malloc(sizeof(mpc_stack_t));
+  
+  s->parsers_num = 0;
+  s->parsers_slots = 0;
+  s->parsers = NULL;
+  s->states = NULL;
+  
+  s->results_num = 0;
+  s->results_slots = 0;
+  s->results = NULL;
+  s->returns = NULL;
+  
+  s->err = mpc_err_fail(filename, mpc_state_invalid(), "Unknown Error");
+  
+  return s;
+}
+
+static void mpc_stack_err(mpc_stack_t *s, mpc_err_t* e) {
+  mpc_err_t *errs[2];
+  errs[0] = s->err;
+  errs[1] = e;
+  s->err = mpc_err_or(errs, 2);
+}
+
+static int mpc_stack_terminate(mpc_stack_t *s, mpc_result_t *r) {
+  int success = s->returns[0];
+  
+  if (success) {
+    r->output = s->results[0].output;
+    mpc_err_delete(s->err);
+  } else {
+    mpc_stack_err(s, s->results[0].error);
+    r->error = s->err;
+  }
+  
+  free(s->parsers);
+  free(s->states);
+  free(s->results);
+  free(s->returns);
+  free(s);
+  
+  return success;
+}
+
+/* Stack Parser Stuff */
+
+static void mpc_stack_set_state(mpc_stack_t *s, int x) {
+  s->states[s->parsers_num-1] = x;
+}
+
+static void mpc_stack_parsers_reserve_more(mpc_stack_t *s) {
+  if (s->parsers_num > s->parsers_slots) {
+    s->parsers_slots = ceil((s->parsers_slots+1) * 1.5);
+    s->parsers = realloc(s->parsers, sizeof(mpc_parser_t*) * s->parsers_slots);
+    s->states = realloc(s->states, sizeof(int) * s->parsers_slots);
+  }
+}
+
+static void mpc_stack_parsers_reserve_less(mpc_stack_t *s) {
+  if (s->parsers_slots > pow(s->parsers_num+1, 1.5)) {
+    s->parsers_slots = floor((s->parsers_slots-1) * (1.0/1.5));
+    s->parsers = realloc(s->parsers, sizeof(mpc_parser_t*) * s->parsers_slots);
+    s->states = realloc(s->states, sizeof(int) * s->parsers_slots);
+  }
+}
+
+static void mpc_stack_pushp(mpc_stack_t *s, mpc_parser_t *p) {
+  s->parsers_num++;
+  mpc_stack_parsers_reserve_more(s);
+  s->parsers[s->parsers_num-1] = p;
+  s->states[s->parsers_num-1] = 0;
+}
+
+static void mpc_stack_popp(mpc_stack_t *s, mpc_parser_t **p, int *st) {
+  *p = s->parsers[s->parsers_num-1];
+  *st = s->states[s->parsers_num-1];
+  s->parsers_num--;
+  mpc_stack_parsers_reserve_less(s);
+}
+
+static void mpc_stack_peepp(mpc_stack_t *s, mpc_parser_t **p, int *st) {
+  *p = s->parsers[s->parsers_num-1];
+  *st = s->states[s->parsers_num-1];
+}
+
+static int mpc_stack_empty(mpc_stack_t *s) {
+  return s->parsers_num == 0;
+}
+
+/* Stack Result Stuff */
+
+static mpc_result_t mpc_result_err(mpc_err_t *e) {
+  mpc_result_t r;
+  r.error = e;
+  return r;
+}
+
+static mpc_result_t mpc_result_out(mpc_val_t *x) {
+  mpc_result_t r;
+  r.output = x;
+  return r;
+}
+
+static void mpc_stack_results_reserve_more(mpc_stack_t *s) {
+  if (s->results_num > s->results_slots) {
+    s->results_slots = ceil((s->results_slots + 1) * 1.5);
+    s->results = realloc(s->results, sizeof(mpc_result_t) * s->results_slots);
+    s->returns = realloc(s->returns, sizeof(int) * s->results_slots);
+  }
+}
+
+static void mpc_stack_results_reserve_less(mpc_stack_t *s) {
+  if ( s->results_slots > pow(s->results_num+1, 1.5)) {
+    s->results_slots = floor((s->results_slots-1) * (1.0/1.5));
+    s->results = realloc(s->results, sizeof(mpc_result_t) * s->results_slots);
+    s->returns = realloc(s->returns, sizeof(int) * s->results_slots);
+  }
+}
+
+static void mpc_stack_pushr(mpc_stack_t *s, mpc_result_t x, int r) {
+  s->results_num++;
+  mpc_stack_results_reserve_more(s);
+  s->results[s->results_num-1] = x;
+  s->returns[s->results_num-1] = r;
+}
+
+static int mpc_stack_popr(mpc_stack_t *s, mpc_result_t *x) {
+  int r;
+  *x = s->results[s->results_num-1];
+  r = s->returns[s->results_num-1];
+  s->results_num--;
+  mpc_stack_results_reserve_less(s);
+  return r;
+}
+
+static int mpc_stack_peekr(mpc_stack_t *s, mpc_result_t *x) {
+  *x = s->results[s->results_num-1];
+  return s->returns[s->results_num-1];
+}
+
+static void mpc_stack_popr_err(mpc_stack_t *s, int n) {
+  mpc_result_t x;
+  while (n) {
+    mpc_stack_popr(s, &x);
+    mpc_stack_err(s, x.error);
+    n--;
+  }
+}
+
+static void mpc_stack_popr_out(mpc_stack_t *s, int n, mpc_dtor_t *ds) {
+  mpc_result_t x;
+  while (n) {
+    mpc_stack_popr(s, &x);
+    ds[n-1](x.output);
+    n--;
+  }
+}
+
+static void mpc_stack_popr_out_single(mpc_stack_t *s, int n, mpc_dtor_t dx) {
+  mpc_result_t x;
+  while (n) {
+    mpc_stack_popr(s, &x);
+    dx(x.output);
+    n--;
+  }
+}
+
+static void mpc_stack_popr_n(mpc_stack_t *s, int n) {
+  mpc_result_t x;
+  while (n) {
+    mpc_stack_popr(s, &x);
+    n--;
+  }
+}
+
+static mpc_val_t *mpc_stack_merger_out(mpc_stack_t *s, int n, mpc_fold_t f) {
+  mpc_val_t *x = f(n, (mpc_val_t**)(&s->results[s->results_num-n]));
+  mpc_stack_popr_n(s, n);
+  return x;
+}
+
+static mpc_err_t *mpc_stack_merger_err(mpc_stack_t *s, int n) {
+  mpc_err_t *x = mpc_err_or((mpc_err_t**)(&s->results[s->results_num-n]), n);
+  mpc_stack_popr_n(s, n);
+  return x;
+}
+
+/*
+** This is rather pleasant. The core parsing routine
+** is written in about 200 lines of C.
+**
+** I also love the way in which each parsing type
+** concisely matches some construct or pattern.
+**
+** Particularly nice are the `or` and `and`
+** types which have a broken but mirrored structure
+** with return value and error reflected.
+**
+** When this function was written in recursive form
+** it looked pretty nice. But I've since switched
+** it around to an awkward while loop. It was an
+** unfortunate change for code simplicity but it
+** is noble in the name of performance (and 
+** not smashing the stack).
+**
+** But it is now a pretty ugly beast...
+*/
+
+#define MPC_CONTINUE(st, x) mpc_stack_set_state(stk, st); mpc_stack_pushp(stk, x); continue
+#define MPC_SUCCESS(x) mpc_stack_popp(stk, &p, &st); mpc_stack_pushr(stk, mpc_result_out(x), 1); continue
+#define MPC_FAILURE(x) mpc_stack_popp(stk, &p, &st); mpc_stack_pushr(stk, mpc_result_err(x), 0); continue
+#define MPC_PRIMATIVE(x, f) if (f) { MPC_SUCCESS(x); } else { MPC_FAILURE(mpc_err_fail(i->filename, i->state, "Incorrect Input")); }
+
+int mpc_parse_input(mpc_input_t *i, mpc_parser_t *init, mpc_result_t *final) {
+  
+  /* Stack */
+  int st = 0;
+  mpc_parser_t *p = NULL;
+  mpc_stack_t *stk = mpc_stack_new(i->filename);
+  
+  /* Variables */
+  char *s;
+  mpc_result_t r;
+
+  /* Go! */
+  mpc_stack_pushp(stk, init);
+  
+  while (!mpc_stack_empty(stk)) {
+    
+    mpc_stack_peepp(stk, &p, &st);
+    
+    switch (p->type) {
+      
+      /* Basic Parsers */
+
+      case MPC_TYPE_ANY:       MPC_PRIMATIVE(s, mpc_input_any(i, &s));
+      case MPC_TYPE_SINGLE:    MPC_PRIMATIVE(s, mpc_input_char(i, p->data.single.x, &s));
+      case MPC_TYPE_RANGE:     MPC_PRIMATIVE(s, mpc_input_range(i, p->data.range.x, p->data.range.y, &s));
+      case MPC_TYPE_ONEOF:     MPC_PRIMATIVE(s, mpc_input_oneof(i, p->data.string.x, &s));
+      case MPC_TYPE_NONEOF:    MPC_PRIMATIVE(s, mpc_input_noneof(i, p->data.string.x, &s));
+      case MPC_TYPE_SATISFY:   MPC_PRIMATIVE(s, mpc_input_satisfy(i, p->data.satisfy.f, &s));
+      case MPC_TYPE_STRING:    MPC_PRIMATIVE(s, mpc_input_string(i, p->data.string.x, &s));
+      
+      /* Other parsers */
+      
+      case MPC_TYPE_UNDEFINED: MPC_FAILURE(mpc_err_fail(i->filename, i->state, "Parser Undefined!"));      
+      case MPC_TYPE_PASS:      MPC_SUCCESS(NULL);
+      case MPC_TYPE_FAIL:      MPC_FAILURE(mpc_err_fail(i->filename, i->state, p->data.fail.m));
+      case MPC_TYPE_LIFT:      MPC_SUCCESS(p->data.lift.lf());
+      case MPC_TYPE_LIFT_VAL:  MPC_SUCCESS(p->data.lift.x);
+      case MPC_TYPE_STATE:     MPC_SUCCESS(mpc_state_copy(i->state));
+      
+      case MPC_TYPE_ANCHOR:
+        if (mpc_input_anchor(i, p->data.anchor.f)) {
+          MPC_SUCCESS(NULL);
+        } else {
+          MPC_FAILURE(mpc_err_new(i->filename, i->state, "anchor", mpc_input_peekc(i)));
+        }
+      
+      /* Application Parsers */
+      
+      case MPC_TYPE_EXPECT:
+        if (st == 0) { MPC_CONTINUE(1, p->data.expect.x); }
+        if (st == 1) {
+          if (mpc_stack_popr(stk, &r)) {
+            MPC_SUCCESS(r.output);
+          } else {
+            mpc_err_delete(r.error); 
+            MPC_FAILURE(mpc_err_new(i->filename, i->state, p->data.expect.m, mpc_input_peekc(i)));
+          }
+        }
+      
+      case MPC_TYPE_APPLY:
+        if (st == 0) { MPC_CONTINUE(1, p->data.apply.x); }
+        if (st == 1) {
+          if (mpc_stack_popr(stk, &r)) {
+            MPC_SUCCESS(p->data.apply.f(r.output));
+          } else {
+            MPC_FAILURE(r.error);
+          }
+        }
+      
+      case MPC_TYPE_APPLY_TO:
+        if (st == 0) { MPC_CONTINUE(1, p->data.apply_to.x); }
+        if (st == 1) {
+          if (mpc_stack_popr(stk, &r)) {
+            MPC_SUCCESS(p->data.apply_to.f(r.output, p->data.apply_to.d));
+          } else {
+            MPC_FAILURE(r.error);
+          }
+        }
+      
+      case MPC_TYPE_PREDICT:
+        if (st == 0) { mpc_input_backtrack_disable(i); MPC_CONTINUE(1, p->data.predict.x); }
+        if (st == 1) {
+          mpc_input_backtrack_enable(i);
+          mpc_stack_popp(stk, &p, &st);
+          continue;
+        }
+      
+      /* Optional Parsers */
+      
+      /* TODO: Update Not Error Message */
+      
+      case MPC_TYPE_NOT:
+        if (st == 0) { mpc_input_mark(i); MPC_CONTINUE(1, p->data.not.x); }
+        if (st == 1) {
+          if (mpc_stack_popr(stk, &r)) {
+            mpc_input_rewind(i);
+            p->data.not.dx(r.output);
+            MPC_FAILURE(mpc_err_new(i->filename, i->state, "opposite", mpc_input_peekc(i)));
+          } else {
+            mpc_input_unmark(i);
+            mpc_stack_err(stk, r.error);
+            MPC_SUCCESS(p->data.not.lf());
+          }
+        }
+      
+      case MPC_TYPE_MAYBE:
+        if (st == 0) { MPC_CONTINUE(1, p->data.not.x); }
+        if (st == 1) {
+          if (mpc_stack_popr(stk, &r)) {
+            MPC_SUCCESS(r.output);
+          } else {
+            mpc_stack_err(stk, r.error);
+            MPC_SUCCESS(p->data.not.lf());
+          }
+        }
+      
+      /* Repeat Parsers */
+      
+      case MPC_TYPE_MANY:
+        if (st == 0) { MPC_CONTINUE(st+1, p->data.repeat.x); }
+        if (st >  0) {
+          if (mpc_stack_peekr(stk, &r)) {
+            MPC_CONTINUE(st+1, p->data.repeat.x);
+          } else {
+            mpc_stack_popr(stk, &r);
+            mpc_stack_err(stk, r.error);
+            MPC_SUCCESS(mpc_stack_merger_out(stk, st-1, p->data.repeat.f));
+          }
+        }
+      
+      case MPC_TYPE_MANY1:
+        if (st == 0) { MPC_CONTINUE(st+1, p->data.repeat.x); }
+        if (st >  0) {
+          if (mpc_stack_peekr(stk, &r)) {
+            MPC_CONTINUE(st+1, p->data.repeat.x);
+          } else {
+            if (st == 1) {
+              mpc_stack_popr(stk, &r);
+              MPC_FAILURE(mpc_err_many1(r.error));
+            } else {
+              mpc_stack_popr(stk, &r);
+              mpc_stack_err(stk, r.error);
+              MPC_SUCCESS(mpc_stack_merger_out(stk, st-1, p->data.repeat.f));
+            }
+          }
+        }
+      
+      case MPC_TYPE_COUNT:
+        if (st == 0) { mpc_input_mark(i); MPC_CONTINUE(st+1, p->data.repeat.x); }
+        if (st >  0) {
+          if (mpc_stack_peekr(stk, &r)) {
+            MPC_CONTINUE(st+1, p->data.repeat.x);
+          } else {
+            if (st != (p->data.repeat.n+1)) {
+              mpc_stack_popr(stk, &r);
+              mpc_stack_popr_out_single(stk, st-1, p->data.repeat.dx);
+              mpc_input_rewind(i);
+              MPC_FAILURE(mpc_err_count(r.error, p->data.repeat.n));
+            } else {
+              mpc_stack_popr(stk, &r);
+              mpc_stack_err(stk, r.error);
+              mpc_input_unmark(i);
+              MPC_SUCCESS(mpc_stack_merger_out(stk, st-1, p->data.repeat.f));
+            }
+          }
+        }
         
-
-
-      <div id="start-of-content" class="accessibility-aid"></div>
-          <div class="site" itemscope itemtype="http://schema.org/WebPage">
-    <div id="js-flash-container">
+      /* Combinatory Parsers */
       
-    </div>
-    <div class="pagehead repohead instapaper_ignore readability-menu">
-      <div class="container">
+      case MPC_TYPE_OR:
         
-<ul class="pagehead-actions">
-
-    <li class="subscription">
-      <form accept-charset="UTF-8" action="/notifications/subscribe" class="js-social-container" data-autosubmit="true" data-remote="true" method="post"><div style="margin:0;padding:0;display:inline"><input name="utf8" type="hidden" value="&#x2713;" /><input name="authenticity_token" type="hidden" value="upYrCd45b4gYo9/r6dF65/YOtdcsXwQrrBTVQlC/Rqz+FLZ0KURGZljpM16oNP7+44h7JZF6Txdz9CsmufTxKQ==" /></div>  <input id="repository_id" name="repository_id" type="hidden" value="13122868" />
-
-    <div class="select-menu js-menu-container js-select-menu">
-      <a class="social-count js-social-count" href="/orangeduck/mpc/watchers">
-        30
-      </a>
-      <a href="/orangeduck/mpc/subscription"
-        class="minibutton select-menu-button with-count js-menu-target" role="button" tabindex="0" aria-haspopup="true">
-        <span class="js-select-button">
-          <span class="octicon octicon-eye"></span>
-          Watch
-        </span>
-      </a>
-
-      <div class="select-menu-modal-holder">
-        <div class="select-menu-modal subscription-menu-modal js-menu-content" aria-hidden="true">
-          <div class="select-menu-header">
-            <span class="select-menu-title">Notifications</span>
-            <span class="octicon octicon-x js-menu-close" role="button" aria-label="Close"></span>
-          </div> <!-- /.select-menu-header -->
-
-          <div class="select-menu-list js-navigation-container" role="menu">
-
-            <div class="select-menu-item js-navigation-item selected" role="menuitem" tabindex="0">
-              <span class="select-menu-item-icon octicon octicon-check"></span>
-              <div class="select-menu-item-text">
-                <input checked="checked" id="do_included" name="do" type="radio" value="included" />
-                <h4>Not watching</h4>
-                <span class="description">Be notified when participating or @mentioned.</span>
-                <span class="js-select-button-text hidden-select-button-text">
-                  <span class="octicon octicon-eye"></span>
-                  Watch
-                </span>
-              </div>
-            </div> <!-- /.select-menu-item -->
-
-            <div class="select-menu-item js-navigation-item " role="menuitem" tabindex="0">
-              <span class="select-menu-item-icon octicon octicon octicon-check"></span>
-              <div class="select-menu-item-text">
-                <input id="do_subscribed" name="do" type="radio" value="subscribed" />
-                <h4>Watching</h4>
-                <span class="description">Be notified of all conversations.</span>
-                <span class="js-select-button-text hidden-select-button-text">
-                  <span class="octicon octicon-eye"></span>
-                  Unwatch
-                </span>
-              </div>
-            </div> <!-- /.select-menu-item -->
-
-            <div class="select-menu-item js-navigation-item " role="menuitem" tabindex="0">
-              <span class="select-menu-item-icon octicon octicon-check"></span>
-              <div class="select-menu-item-text">
-                <input id="do_ignore" name="do" type="radio" value="ignore" />
-                <h4>Ignoring</h4>
-                <span class="description">Never be notified.</span>
-                <span class="js-select-button-text hidden-select-button-text">
-                  <span class="octicon octicon-mute"></span>
-                  Stop ignoring
-                </span>
-              </div>
-            </div> <!-- /.select-menu-item -->
-
-          </div> <!-- /.select-menu-list -->
-
-        </div> <!-- /.select-menu-modal -->
-      </div> <!-- /.select-menu-modal-holder -->
-    </div> <!-- /.select-menu -->
-
-</form>
-    </li>
-
-  <li>
-    
-  <div class="js-toggler-container js-social-container starring-container ">
-
-    <form accept-charset="UTF-8" action="/orangeduck/mpc/unstar" class="js-toggler-form starred js-unstar-button" data-remote="true" method="post"><div style="margin:0;padding:0;display:inline"><input name="utf8" type="hidden" value="&#x2713;" /><input name="authenticity_token" type="hidden" value="rC7uaX6Fd6FjWmz79rvZYdmKnI5VP8mk9QcDOgfPe7Y5IpFXsYDhPJsbE12E/q4RWxahC9Hrw1t7lyr0yZZt7w==" /></div>
-      <button
-        class="minibutton with-count js-toggler-target star-button"
-        aria-label="Unstar this repository" title="Unstar orangeduck/mpc">
-        <span class="octicon octicon-star"></span>
-        Unstar
-      </button>
-        <a class="social-count js-social-count" href="/orangeduck/mpc/stargazers">
-          295
-        </a>
-</form>
-    <form accept-charset="UTF-8" action="/orangeduck/mpc/star" class="js-toggler-form unstarred js-star-button" data-remote="true" method="post"><div style="margin:0;padding:0;display:inline"><input name="utf8" type="hidden" value="&#x2713;" /><input name="authenticity_token" type="hidden" value="6IM1DW9v9vcIA8y7h6BlxvJYvYINK7KaHMQrx4MD2W0D+FU9a+hhJxOrnh3WodS0cqBGs5MWPNTD4aF3nDPGJQ==" /></div>
-      <button
-        class="minibutton with-count js-toggler-target star-button"
-        aria-label="Star this repository" title="Star orangeduck/mpc">
-        <span class="octicon octicon-star"></span>
-        Star
-      </button>
-        <a class="social-count js-social-count" href="/orangeduck/mpc/stargazers">
-          295
-        </a>
-</form>  </div>
-
-  </li>
-
-
-        <li>
-          <a href="/orangeduck/mpc/fork" class="minibutton with-count js-toggler-target fork-button tooltipped-n" title="Fork your own copy of orangeduck/mpc to your account" aria-label="Fork your own copy of orangeduck/mpc to your account" rel="facebox nofollow">
-            <span class="octicon octicon-repo-forked"></span>
-            Fork
-          </a>
-          <a href="/orangeduck/mpc/network" class="social-count">37</a>
-        </li>
-
-</ul>
-
-        <h1 itemscope itemtype="http://data-vocabulary.org/Breadcrumb" class="entry-title public">
-          <span class="mega-octicon octicon-repo"></span>
-          <span class="author"><a href="/orangeduck" class="url fn" itemprop="url" rel="author"><span itemprop="title">orangeduck</span></a></span><!--
-       --><span class="path-divider">/</span><!--
-       --><strong><a href="/orangeduck/mpc" class="js-current-repository" data-pjax="#js-repo-pjax-container">mpc</a></strong>
-
-          <span class="page-context-loader">
-            <img alt="" height="16" src="https://assets-cdn.github.com/images/spinners/octocat-spinner-32.gif" width="16" />
-          </span>
-
-        </h1>
-      </div><!-- /.container -->
-    </div><!-- /.repohead -->
-
-    <div class="container">
-      <div class="repository-with-sidebar repo-container new-discussion-timeline  ">
-        <div class="repository-sidebar clearfix">
-            
-<nav class="sunken-menu repo-nav js-repo-nav js-sidenav-container-pjax js-octicon-loaders"
-     role="navigation"
-     data-pjax="#js-repo-pjax-container"
-     data-issue-count-url="/orangeduck/mpc/issues/counts">
-  <ul class="sunken-menu-group">
-    <li class="tooltipped tooltipped-w" aria-label="Code">
-      <a href="/orangeduck/mpc" aria-label="Code" class="selected js-selected-navigation-item sunken-menu-item" data-hotkey="g c" data-selected-links="repo_source repo_downloads repo_commits repo_releases repo_tags repo_branches /orangeduck/mpc">
-        <span class="octicon octicon-code"></span> <span class="full-word">Code</span>
-        <img alt="" class="mini-loader" height="16" src="https://assets-cdn.github.com/images/spinners/octocat-spinner-32.gif" width="16" />
-</a>    </li>
-
-      <li class="tooltipped tooltipped-w" aria-label="Issues">
-        <a href="/orangeduck/mpc/issues" aria-label="Issues" class="js-selected-navigation-item sunken-menu-item" data-hotkey="g i" data-selected-links="repo_issues repo_labels repo_milestones /orangeduck/mpc/issues">
-          <span class="octicon octicon-issue-opened"></span> <span class="full-word">Issues</span>
-          <span class="js-issue-replace-counter"></span>
-          <img alt="" class="mini-loader" height="16" src="https://assets-cdn.github.com/images/spinners/octocat-spinner-32.gif" width="16" />
-</a>      </li>
-
-    <li class="tooltipped tooltipped-w" aria-label="Pull Requests">
-      <a href="/orangeduck/mpc/pulls" aria-label="Pull Requests" class="js-selected-navigation-item sunken-menu-item" data-hotkey="g p" data-selected-links="repo_pulls /orangeduck/mpc/pulls">
-          <span class="octicon octicon-git-pull-request"></span> <span class="full-word">Pull Requests</span>
-          <span class="js-pull-replace-counter"></span>
-          <img alt="" class="mini-loader" height="16" src="https://assets-cdn.github.com/images/spinners/octocat-spinner-32.gif" width="16" />
-</a>    </li>
-
-
-      <li class="tooltipped tooltipped-w" aria-label="Wiki">
-        <a href="/orangeduck/mpc/wiki" aria-label="Wiki" class="js-selected-navigation-item sunken-menu-item" data-hotkey="g w" data-selected-links="repo_wiki /orangeduck/mpc/wiki">
-          <span class="octicon octicon-book"></span> <span class="full-word">Wiki</span>
-          <img alt="" class="mini-loader" height="16" src="https://assets-cdn.github.com/images/spinners/octocat-spinner-32.gif" width="16" />
-</a>      </li>
-  </ul>
-  <div class="sunken-menu-separator"></div>
-  <ul class="sunken-menu-group">
-
-    <li class="tooltipped tooltipped-w" aria-label="Pulse">
-      <a href="/orangeduck/mpc/pulse" aria-label="Pulse" class="js-selected-navigation-item sunken-menu-item" data-selected-links="pulse /orangeduck/mpc/pulse">
-        <span class="octicon octicon-pulse"></span> <span class="full-word">Pulse</span>
-        <img alt="" class="mini-loader" height="16" src="https://assets-cdn.github.com/images/spinners/octocat-spinner-32.gif" width="16" />
-</a>    </li>
-
-    <li class="tooltipped tooltipped-w" aria-label="Graphs">
-      <a href="/orangeduck/mpc/graphs" aria-label="Graphs" class="js-selected-navigation-item sunken-menu-item" data-selected-links="repo_graphs repo_contributors /orangeduck/mpc/graphs">
-        <span class="octicon octicon-graph"></span> <span class="full-word">Graphs</span>
-        <img alt="" class="mini-loader" height="16" src="https://assets-cdn.github.com/images/spinners/octocat-spinner-32.gif" width="16" />
-</a>    </li>
-  </ul>
-
-
-</nav>
-
-              <div class="only-with-full-nav">
-                
-  
-<div class="clone-url "
-  data-protocol-type="http"
-  data-url="/users/set_protocol?protocol_selector=http&amp;protocol_type=clone">
-  <h3><span class="text-emphasized">HTTPS</span> clone URL</h3>
-  <div class="input-group">
-    <input type="text" class="input-mini input-monospace js-url-field"
-           value="https://github.com/orangeduck/mpc.git" readonly="readonly">
-    <span class="input-group-button">
-      <button aria-label="Copy to clipboard" class="js-zeroclipboard minibutton zeroclipboard-button" data-clipboard-text="https://github.com/orangeduck/mpc.git" data-copied-hint="Copied!" type="button"><span class="octicon octicon-clippy"></span></button>
-    </span>
-  </div>
-</div>
-
-  
-<div class="clone-url open"
-  data-protocol-type="ssh"
-  data-url="/users/set_protocol?protocol_selector=ssh&amp;protocol_type=clone">
-  <h3><span class="text-emphasized">SSH</span> clone URL</h3>
-  <div class="input-group">
-    <input type="text" class="input-mini input-monospace js-url-field"
-           value="git@github.com:orangeduck/mpc.git" readonly="readonly">
-    <span class="input-group-button">
-      <button aria-label="Copy to clipboard" class="js-zeroclipboard minibutton zeroclipboard-button" data-clipboard-text="git@github.com:orangeduck/mpc.git" data-copied-hint="Copied!" type="button"><span class="octicon octicon-clippy"></span></button>
-    </span>
-  </div>
-</div>
-
-  
-<div class="clone-url "
-  data-protocol-type="subversion"
-  data-url="/users/set_protocol?protocol_selector=subversion&amp;protocol_type=clone">
-  <h3><span class="text-emphasized">Subversion</span> checkout URL</h3>
-  <div class="input-group">
-    <input type="text" class="input-mini input-monospace js-url-field"
-           value="https://github.com/orangeduck/mpc" readonly="readonly">
-    <span class="input-group-button">
-      <button aria-label="Copy to clipboard" class="js-zeroclipboard minibutton zeroclipboard-button" data-clipboard-text="https://github.com/orangeduck/mpc" data-copied-hint="Copied!" type="button"><span class="octicon octicon-clippy"></span></button>
-    </span>
-  </div>
-</div>
-
-
-<p class="clone-options">You can clone with
-      <a href="#" class="js-clone-selector" data-protocol="http">HTTPS</a>,
-      <a href="#" class="js-clone-selector" data-protocol="ssh">SSH</a>,
-      or <a href="#" class="js-clone-selector" data-protocol="subversion">Subversion</a>.
-  <a href="https://help.github.com/articles/which-remote-url-should-i-use" class="help tooltipped tooltipped-n" aria-label="Get help on which URL is right for you.">
-    <span class="octicon octicon-question"></span>
-  </a>
-</p>
-
-  <a href="http://mac.github.com" data-url="github-mac://openRepo/https://github.com/orangeduck/mpc" class="minibutton sidebar-button js-conduit-rewrite-url" title="Save orangeduck/mpc to your computer and use it in GitHub Desktop." aria-label="Save orangeduck/mpc to your computer and use it in GitHub Desktop.">
-    <span class="octicon octicon-device-desktop"></span>
-    Clone in Desktop
-  </a>
-
-
-                <a href="/orangeduck/mpc/archive/master.zip"
-                   class="minibutton sidebar-button"
-                   aria-label="Download the contents of orangeduck/mpc as a zip file"
-                   title="Download the contents of orangeduck/mpc as a zip file"
-                   rel="nofollow">
-                  <span class="octicon octicon-cloud-download"></span>
-                  Download ZIP
-                </a>
-              </div>
-        </div><!-- /.repository-sidebar -->
-
-        <div id="js-repo-pjax-container" class="repository-content context-loader-container" data-pjax-container>
-          
-
-<a href="/orangeduck/mpc/blob/f6d7d87b8b35cb34f7a17951ac0ace197e572a01/mpc.c" class="hidden js-permalink-shortcut" data-hotkey="y">Permalink</a>
-
-<!-- blob contrib key: blob_contributors:v21:7888de84be6e2e00817720fd3b70ee09 -->
-
-<div class="file-navigation">
-  
-<div class="select-menu js-menu-container js-select-menu left">
-  <span class="minibutton select-menu-button js-menu-target css-truncate" data-hotkey="w"
-    data-master-branch="master"
-    data-ref="master"
-    title="master"
-    role="button" aria-label="Switch branches or tags" tabindex="0" aria-haspopup="true">
-    <span class="octicon octicon-git-branch"></span>
-    <i>branch:</i>
-    <span class="js-select-button css-truncate-target">master</span>
-  </span>
-
-  <div class="select-menu-modal-holder js-menu-content js-navigation-container" data-pjax aria-hidden="true">
-
-    <div class="select-menu-modal">
-      <div class="select-menu-header">
-        <span class="select-menu-title">Switch branches/tags</span>
-        <span class="octicon octicon-x js-menu-close" role="button" aria-label="Close"></span>
-      </div> <!-- /.select-menu-header -->
-
-      <div class="select-menu-filters">
-        <div class="select-menu-text-filter">
-          <input type="text" aria-label="Filter branches/tags" id="context-commitish-filter-field" class="js-filterable-field js-navigation-enable" placeholder="Filter branches/tags">
-        </div>
-        <div class="select-menu-tabs">
-          <ul>
-            <li class="select-menu-tab">
-              <a href="#" data-tab-filter="branches" class="js-select-menu-tab">Branches</a>
-            </li>
-            <li class="select-menu-tab">
-              <a href="#" data-tab-filter="tags" class="js-select-menu-tab">Tags</a>
-            </li>
-          </ul>
-        </div><!-- /.select-menu-tabs -->
-      </div><!-- /.select-menu-filters -->
-
-      <div class="select-menu-list select-menu-tab-bucket js-select-menu-tab-bucket" data-tab-filter="branches">
-
-        <div data-filterable-for="context-commitish-filter-field" data-filterable-type="substring">
-
-
-            <div class="select-menu-item js-navigation-item selected">
-              <span class="select-menu-item-icon octicon octicon-check"></span>
-              <a href="/orangeduck/mpc/blob/master/mpc.c"
-                 data-name="master"
-                 data-skip-pjax="true"
-                 rel="nofollow"
-                 class="js-navigation-open select-menu-item-text css-truncate-target"
-                 title="master">master</a>
-            </div> <!-- /.select-menu-item -->
-        </div>
-
-          <div class="select-menu-no-results">Nothing to show</div>
-      </div> <!-- /.select-menu-list -->
-
-      <div class="select-menu-list select-menu-tab-bucket js-select-menu-tab-bucket" data-tab-filter="tags">
-        <div data-filterable-for="context-commitish-filter-field" data-filterable-type="substring">
-
-
-        </div>
-
-        <div class="select-menu-no-results">Nothing to show</div>
-      </div> <!-- /.select-menu-list -->
-
-    </div> <!-- /.select-menu-modal -->
-  </div> <!-- /.select-menu-modal-holder -->
-</div> <!-- /.select-menu -->
-
-  <div class="button-group right">
-    <a href="/orangeduck/mpc/find/master"
-          class="js-show-file-finder minibutton empty-icon tooltipped tooltipped-s"
-          data-pjax
-          data-hotkey="t"
-          aria-label="Quickly jump between files">
-      <span class="octicon octicon-list-unordered"></span>
-    </a>
-    <button aria-label="Copy to clipboard" class="js-zeroclipboard minibutton zeroclipboard-button" data-clipboard-text="mpc.c" data-copied-hint="Copied!" type="button"><span class="octicon octicon-clippy"></span></button>
-  </div>
-
-  <div class="breadcrumb">
-    <span class='repo-root js-repo-root'><span itemscope="" itemtype="http://data-vocabulary.org/Breadcrumb"><a href="/orangeduck/mpc" class="" data-branch="master" data-direction="back" data-pjax="true" itemscope="url"><span itemprop="title">mpc</span></a></span></span><span class="separator"> / </span><strong class="final-path">mpc.c</strong>
-  </div>
-</div>
-
-
-  <div class="commit file-history-tease">
-    <div class="file-history-tease-header">
-        <img alt="" class="avatar" height="24" src="https://1.gravatar.com/avatar/dc0e1255984afd164942787826b2c31f?d=https%3A%2F%2Fassets-cdn.github.com%2Fimages%2Fgravatars%2Fgravatar-user-420.png&amp;r=x&amp;s=140" width="24" />
-        <span class="author"><span>Daniel Holden</span></span>
-        <time datetime="2014-10-17T14:32:00Z" is="relative-time">Oct 17, 2014</time>
-        <div class="commit-title">
-            <a href="/orangeduck/mpc/commit/f6d7d87b8b35cb34f7a17951ac0ace197e572a01" class="message" data-pjax="true" title="reverted state to use long type">reverted state to use long type</a>
-        </div>
-    </div>
-
-    <div class="participation">
-      <p class="quickstat">
-        <a href="#blob_contributors_box" rel="facebox">
-          <strong>4</strong>
-           contributors
-        </a>
-      </p>
-          <a class="avatar-link tooltipped tooltipped-s" aria-label="daltonwoodard" href="/orangeduck/mpc/commits/master/mpc.c?author=daltonwoodard"><img alt="Dalton Woodard" class="avatar" data-user="3753122" height="20" src="https://avatars2.githubusercontent.com/u/3753122?v=2&amp;s=40" width="20" /></a>
-    <a class="avatar-link tooltipped tooltipped-s" aria-label="orangeduck" href="/orangeduck/mpc/commits/master/mpc.c?author=orangeduck"><img alt="Daniel Holden" class="avatar" data-user="177299" height="20" src="https://avatars1.githubusercontent.com/u/177299?v=2&amp;s=40" width="20" /></a>
-    <a class="avatar-link tooltipped tooltipped-s" aria-label="kc1212" href="/orangeduck/mpc/commits/master/mpc.c?author=kc1212"><img alt="kc1212" class="avatar" data-user="1093806" height="20" src="https://avatars0.githubusercontent.com/u/1093806?v=2&amp;s=40" width="20" /></a>
-    <a class="avatar-link tooltipped tooltipped-s" aria-label="TortiPesto" href="/orangeduck/mpc/commits/master/mpc.c?author=TortiPesto"><img alt="TortiPesto" class="avatar" data-user="7302897" height="20" src="https://avatars3.githubusercontent.com/u/7302897?v=2&amp;s=40" width="20" /></a>
-
-
-    </div>
-    <div id="blob_contributors_box" style="display:none">
-      <h2 class="facebox-header">Users who have contributed to this file</h2>
-      <ul class="facebox-user-list">
-          <li class="facebox-user-list-item">
-            <img alt="Dalton Woodard" data-user="3753122" height="24" src="https://avatars0.githubusercontent.com/u/3753122?v=2&amp;s=48" width="24" />
-            <a href="/daltonwoodard">daltonwoodard</a>
-          </li>
-          <li class="facebox-user-list-item">
-            <img alt="Daniel Holden" data-user="177299" height="24" src="https://avatars3.githubusercontent.com/u/177299?v=2&amp;s=48" width="24" />
-            <a href="/orangeduck">orangeduck</a>
-          </li>
-          <li class="facebox-user-list-item">
-            <img alt="kc1212" data-user="1093806" height="24" src="https://avatars2.githubusercontent.com/u/1093806?v=2&amp;s=48" width="24" />
-            <a href="/kc1212">kc1212</a>
-          </li>
-          <li class="facebox-user-list-item">
-            <img alt="TortiPesto" data-user="7302897" height="24" src="https://avatars1.githubusercontent.com/u/7302897?v=2&amp;s=48" width="24" />
-            <a href="/TortiPesto">TortiPesto</a>
-          </li>
-      </ul>
-    </div>
-  </div>
-
-<div class="file-box">
-  <div class="file">
-    <div class="meta clearfix">
-      <div class="info file-name">
-          <span>3222 lines (2570 sloc)</span>
-          <span class="meta-divider"></span>
-        <span>86.733 kb</span>
-      </div>
-      <div class="actions">
-        <div class="button-group">
-          <a href="/orangeduck/mpc/raw/master/mpc.c" class="minibutton " id="raw-url">Raw</a>
-            <a href="/orangeduck/mpc/blame/master/mpc.c" class="minibutton js-update-url-with-hash">Blame</a>
-          <a href="/orangeduck/mpc/commits/master/mpc.c" class="minibutton " rel="nofollow">History</a>
-        </div><!-- /.button-group -->
-
-          <a class="octicon-button tooltipped tooltipped-nw js-conduit-openfile-check"
-             href="http://mac.github.com"
-             data-url="github-mac://openRepo/https://github.com/orangeduck/mpc?branch=master&amp;filepath=mpc.c"
-             aria-label="Open this file in GitHub for Mac"
-             data-failed-title="Your version of GitHub for Mac is too old to open this file. Try checking for updates.">
-              <span class="octicon octicon-device-desktop"></span>
-          </a>
-
-              <a class="octicon-button tooltipped tooltipped-n js-update-url-with-hash"
-                 aria-label="Clicking this button will fork this project so you can edit the file"
-                 href="/orangeduck/mpc/edit/master/mpc.c"
-                 data-method="post" rel="nofollow"><span class="octicon octicon-pencil"></span></a>
-
-            <a class="octicon-button danger tooltipped tooltipped-s"
-               href="/orangeduck/mpc/delete/master/mpc.c"
-               aria-label="Fork this project and delete file"
-               data-method="post" data-test-id="delete-blob-file" rel="nofollow">
-          <span class="octicon octicon-trashcan"></span>
-        </a>
-      </div><!-- /.actions -->
-    </div>
-    
-
-  <div class="blob-wrapper data type-c">
-      <table class="highlight tab-size-8 js-file-line-container">
-      <tr>
-        <td id="L1" class="blob-num js-line-number" data-line-number="1"></td>
-        <td id="LC1" class="blob-code js-file-line">#<span class="pl-k">include</span> <span class="pl-s1"><span class="pl-pds">&quot;</span>mpc.h<span class="pl-pds">&quot;</span></span></td>
-      </tr>
-      <tr>
-        <td id="L2" class="blob-num js-line-number" data-line-number="2"></td>
-        <td id="LC2" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L3" class="blob-num js-line-number" data-line-number="3"></td>
-        <td id="LC3" class="blob-code js-file-line"><span class="pl-c">/*</span></td>
-      </tr>
-      <tr>
-        <td id="L4" class="blob-num js-line-number" data-line-number="4"></td>
-        <td id="LC4" class="blob-code js-file-line"><span class="pl-c">** State Type</span></td>
-      </tr>
-      <tr>
-        <td id="L5" class="blob-num js-line-number" data-line-number="5"></td>
-        <td id="LC5" class="blob-code js-file-line"><span class="pl-c">*/</span></td>
-      </tr>
-      <tr>
-        <td id="L6" class="blob-num js-line-number" data-line-number="6"></td>
-        <td id="LC6" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L7" class="blob-num js-line-number" data-line-number="7"></td>
-        <td id="LC7" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_state_t</span> <span class="pl-en">mpc_state_invalid</span>(<span class="pl-st">void</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L8" class="blob-num js-line-number" data-line-number="8"></td>
-        <td id="LC8" class="blob-code js-file-line">  <span class="pl-s3">mpc_state_t</span> s;</td>
-      </tr>
-      <tr>
-        <td id="L9" class="blob-num js-line-number" data-line-number="9"></td>
-        <td id="LC9" class="blob-code js-file-line">  s.<span class="pl-vo">pos</span> = -<span class="pl-c1">1</span>;</td>
-      </tr>
-      <tr>
-        <td id="L10" class="blob-num js-line-number" data-line-number="10"></td>
-        <td id="LC10" class="blob-code js-file-line">  s.<span class="pl-vo">row</span> = -<span class="pl-c1">1</span>;</td>
-      </tr>
-      <tr>
-        <td id="L11" class="blob-num js-line-number" data-line-number="11"></td>
-        <td id="LC11" class="blob-code js-file-line">  s.<span class="pl-vo">col</span> = -<span class="pl-c1">1</span>;</td>
-      </tr>
-      <tr>
-        <td id="L12" class="blob-num js-line-number" data-line-number="12"></td>
-        <td id="LC12" class="blob-code js-file-line">  <span class="pl-k">return</span> s;</td>
-      </tr>
-      <tr>
-        <td id="L13" class="blob-num js-line-number" data-line-number="13"></td>
-        <td id="LC13" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L14" class="blob-num js-line-number" data-line-number="14"></td>
-        <td id="LC14" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L15" class="blob-num js-line-number" data-line-number="15"></td>
-        <td id="LC15" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_state_t</span> <span class="pl-en">mpc_state_new</span>(<span class="pl-st">void</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L16" class="blob-num js-line-number" data-line-number="16"></td>
-        <td id="LC16" class="blob-code js-file-line">  <span class="pl-s3">mpc_state_t</span> s;</td>
-      </tr>
-      <tr>
-        <td id="L17" class="blob-num js-line-number" data-line-number="17"></td>
-        <td id="LC17" class="blob-code js-file-line">  s.<span class="pl-vo">pos</span> = <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L18" class="blob-num js-line-number" data-line-number="18"></td>
-        <td id="LC18" class="blob-code js-file-line">  s.<span class="pl-vo">row</span> = <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L19" class="blob-num js-line-number" data-line-number="19"></td>
-        <td id="LC19" class="blob-code js-file-line">  s.<span class="pl-vo">col</span> = <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L20" class="blob-num js-line-number" data-line-number="20"></td>
-        <td id="LC20" class="blob-code js-file-line">  <span class="pl-k">return</span> s;</td>
-      </tr>
-      <tr>
-        <td id="L21" class="blob-num js-line-number" data-line-number="21"></td>
-        <td id="LC21" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L22" class="blob-num js-line-number" data-line-number="22"></td>
-        <td id="LC22" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L23" class="blob-num js-line-number" data-line-number="23"></td>
-        <td id="LC23" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_state_t</span> *<span class="pl-en">mpc_state_copy</span>(<span class="pl-s3">mpc_state_t</span> s) {</td>
-      </tr>
-      <tr>
-        <td id="L24" class="blob-num js-line-number" data-line-number="24"></td>
-        <td id="LC24" class="blob-code js-file-line">  <span class="pl-s3">mpc_state_t</span> *r = <span class="pl-s3">malloc</span>(<span class="pl-k">sizeof</span>(<span class="pl-s3">mpc_state_t</span>));</td>
-      </tr>
-      <tr>
-        <td id="L25" class="blob-num js-line-number" data-line-number="25"></td>
-        <td id="LC25" class="blob-code js-file-line">  <span class="pl-s3">memcpy</span>(r, &amp;s, <span class="pl-k">sizeof</span>(<span class="pl-s3">mpc_state_t</span>));</td>
-      </tr>
-      <tr>
-        <td id="L26" class="blob-num js-line-number" data-line-number="26"></td>
-        <td id="LC26" class="blob-code js-file-line">  <span class="pl-k">return</span> r;</td>
-      </tr>
-      <tr>
-        <td id="L27" class="blob-num js-line-number" data-line-number="27"></td>
-        <td id="LC27" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L28" class="blob-num js-line-number" data-line-number="28"></td>
-        <td id="LC28" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L29" class="blob-num js-line-number" data-line-number="29"></td>
-        <td id="LC29" class="blob-code js-file-line"><span class="pl-c">/*</span></td>
-      </tr>
-      <tr>
-        <td id="L30" class="blob-num js-line-number" data-line-number="30"></td>
-        <td id="LC30" class="blob-code js-file-line"><span class="pl-c">** Error Type</span></td>
-      </tr>
-      <tr>
-        <td id="L31" class="blob-num js-line-number" data-line-number="31"></td>
-        <td id="LC31" class="blob-code js-file-line"><span class="pl-c">*/</span></td>
-      </tr>
-      <tr>
-        <td id="L32" class="blob-num js-line-number" data-line-number="32"></td>
-        <td id="LC32" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L33" class="blob-num js-line-number" data-line-number="33"></td>
-        <td id="LC33" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_err_t</span> *<span class="pl-en">mpc_err_new</span>(<span class="pl-s">const</span> <span class="pl-st">char</span> *filename, <span class="pl-s3">mpc_state_t</span> s, <span class="pl-s">const</span> <span class="pl-st">char</span> *expected, <span class="pl-st">char</span> recieved) {</td>
-      </tr>
-      <tr>
-        <td id="L34" class="blob-num js-line-number" data-line-number="34"></td>
-        <td id="LC34" class="blob-code js-file-line">  <span class="pl-s3">mpc_err_t</span> *x = <span class="pl-s3">malloc</span>(<span class="pl-k">sizeof</span>(<span class="pl-s3">mpc_err_t</span>));</td>
-      </tr>
-      <tr>
-        <td id="L35" class="blob-num js-line-number" data-line-number="35"></td>
-        <td id="LC35" class="blob-code js-file-line">  x-&gt;filename = <span class="pl-s3">malloc</span>(<span class="pl-s3">strlen</span>(filename) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L36" class="blob-num js-line-number" data-line-number="36"></td>
-        <td id="LC36" class="blob-code js-file-line">  <span class="pl-s3">strcpy</span>(x-&gt;filename, filename);</td>
-      </tr>
-      <tr>
-        <td id="L37" class="blob-num js-line-number" data-line-number="37"></td>
-        <td id="LC37" class="blob-code js-file-line">  x-&gt;state = s;</td>
-      </tr>
-      <tr>
-        <td id="L38" class="blob-num js-line-number" data-line-number="38"></td>
-        <td id="LC38" class="blob-code js-file-line">  x-&gt;expected_num = <span class="pl-c1">1</span>;</td>
-      </tr>
-      <tr>
-        <td id="L39" class="blob-num js-line-number" data-line-number="39"></td>
-        <td id="LC39" class="blob-code js-file-line">  x-&gt;expected = <span class="pl-s3">malloc</span>(<span class="pl-k">sizeof</span>(<span class="pl-st">char</span>*));</td>
-      </tr>
-      <tr>
-        <td id="L40" class="blob-num js-line-number" data-line-number="40"></td>
-        <td id="LC40" class="blob-code js-file-line">  x-&gt;expected[<span class="pl-c1">0</span>] = <span class="pl-s3">malloc</span>(<span class="pl-s3">strlen</span>(expected) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L41" class="blob-num js-line-number" data-line-number="41"></td>
-        <td id="LC41" class="blob-code js-file-line">  <span class="pl-s3">strcpy</span>(x-&gt;expected[<span class="pl-c1">0</span>], expected);</td>
-      </tr>
-      <tr>
-        <td id="L42" class="blob-num js-line-number" data-line-number="42"></td>
-        <td id="LC42" class="blob-code js-file-line">  x-&gt;failure = <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L43" class="blob-num js-line-number" data-line-number="43"></td>
-        <td id="LC43" class="blob-code js-file-line">  x-&gt;recieved = recieved;</td>
-      </tr>
-      <tr>
-        <td id="L44" class="blob-num js-line-number" data-line-number="44"></td>
-        <td id="LC44" class="blob-code js-file-line">  <span class="pl-k">return</span> x;</td>
-      </tr>
-      <tr>
-        <td id="L45" class="blob-num js-line-number" data-line-number="45"></td>
-        <td id="LC45" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L46" class="blob-num js-line-number" data-line-number="46"></td>
-        <td id="LC46" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L47" class="blob-num js-line-number" data-line-number="47"></td>
-        <td id="LC47" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_err_t</span> *<span class="pl-en">mpc_err_fail</span>(<span class="pl-s">const</span> <span class="pl-st">char</span> *filename, <span class="pl-s3">mpc_state_t</span> s, <span class="pl-s">const</span> <span class="pl-st">char</span> *failure) {</td>
-      </tr>
-      <tr>
-        <td id="L48" class="blob-num js-line-number" data-line-number="48"></td>
-        <td id="LC48" class="blob-code js-file-line">  <span class="pl-s3">mpc_err_t</span> *x = <span class="pl-s3">malloc</span>(<span class="pl-k">sizeof</span>(<span class="pl-s3">mpc_err_t</span>));</td>
-      </tr>
-      <tr>
-        <td id="L49" class="blob-num js-line-number" data-line-number="49"></td>
-        <td id="LC49" class="blob-code js-file-line">  x-&gt;filename = <span class="pl-s3">malloc</span>(<span class="pl-s3">strlen</span>(filename) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L50" class="blob-num js-line-number" data-line-number="50"></td>
-        <td id="LC50" class="blob-code js-file-line">  <span class="pl-s3">strcpy</span>(x-&gt;filename, filename);</td>
-      </tr>
-      <tr>
-        <td id="L51" class="blob-num js-line-number" data-line-number="51"></td>
-        <td id="LC51" class="blob-code js-file-line">  x-&gt;state = s;</td>
-      </tr>
-      <tr>
-        <td id="L52" class="blob-num js-line-number" data-line-number="52"></td>
-        <td id="LC52" class="blob-code js-file-line">  x-&gt;expected_num = <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L53" class="blob-num js-line-number" data-line-number="53"></td>
-        <td id="LC53" class="blob-code js-file-line">  x-&gt;expected = <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L54" class="blob-num js-line-number" data-line-number="54"></td>
-        <td id="LC54" class="blob-code js-file-line">  x-&gt;failure = <span class="pl-s3">malloc</span>(<span class="pl-s3">strlen</span>(failure) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L55" class="blob-num js-line-number" data-line-number="55"></td>
-        <td id="LC55" class="blob-code js-file-line">  <span class="pl-s3">strcpy</span>(x-&gt;failure, failure);</td>
-      </tr>
-      <tr>
-        <td id="L56" class="blob-num js-line-number" data-line-number="56"></td>
-        <td id="LC56" class="blob-code js-file-line">  x-&gt;recieved = <span class="pl-s1"><span class="pl-pds">&#39;</span> <span class="pl-pds">&#39;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L57" class="blob-num js-line-number" data-line-number="57"></td>
-        <td id="LC57" class="blob-code js-file-line">  <span class="pl-k">return</span> x;</td>
-      </tr>
-      <tr>
-        <td id="L58" class="blob-num js-line-number" data-line-number="58"></td>
-        <td id="LC58" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L59" class="blob-num js-line-number" data-line-number="59"></td>
-        <td id="LC59" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L60" class="blob-num js-line-number" data-line-number="60"></td>
-        <td id="LC60" class="blob-code js-file-line"><span class="pl-st">void</span> <span class="pl-en">mpc_err_delete</span>(<span class="pl-s3">mpc_err_t</span> *x) {</td>
-      </tr>
-      <tr>
-        <td id="L61" class="blob-num js-line-number" data-line-number="61"></td>
-        <td id="LC61" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L62" class="blob-num js-line-number" data-line-number="62"></td>
-        <td id="LC62" class="blob-code js-file-line">  <span class="pl-st">int</span> i;</td>
-      </tr>
-      <tr>
-        <td id="L63" class="blob-num js-line-number" data-line-number="63"></td>
-        <td id="LC63" class="blob-code js-file-line">  <span class="pl-k">for</span> (i = <span class="pl-c1">0</span>; i &lt; x-&gt;expected_num; i++) {</td>
-      </tr>
-      <tr>
-        <td id="L64" class="blob-num js-line-number" data-line-number="64"></td>
-        <td id="LC64" class="blob-code js-file-line">    <span class="pl-s3">free</span>(x-&gt;expected[i]);</td>
-      </tr>
-      <tr>
-        <td id="L65" class="blob-num js-line-number" data-line-number="65"></td>
-        <td id="LC65" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L66" class="blob-num js-line-number" data-line-number="66"></td>
-        <td id="LC66" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L67" class="blob-num js-line-number" data-line-number="67"></td>
-        <td id="LC67" class="blob-code js-file-line">  <span class="pl-s3">free</span>(x-&gt;expected);</td>
-      </tr>
-      <tr>
-        <td id="L68" class="blob-num js-line-number" data-line-number="68"></td>
-        <td id="LC68" class="blob-code js-file-line">  <span class="pl-s3">free</span>(x-&gt;filename);</td>
-      </tr>
-      <tr>
-        <td id="L69" class="blob-num js-line-number" data-line-number="69"></td>
-        <td id="LC69" class="blob-code js-file-line">  <span class="pl-s3">free</span>(x-&gt;failure);</td>
-      </tr>
-      <tr>
-        <td id="L70" class="blob-num js-line-number" data-line-number="70"></td>
-        <td id="LC70" class="blob-code js-file-line">  <span class="pl-s3">free</span>(x);</td>
-      </tr>
-      <tr>
-        <td id="L71" class="blob-num js-line-number" data-line-number="71"></td>
-        <td id="LC71" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L72" class="blob-num js-line-number" data-line-number="72"></td>
-        <td id="LC72" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L73" class="blob-num js-line-number" data-line-number="73"></td>
-        <td id="LC73" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">int</span> <span class="pl-en">mpc_err_contains_expected</span>(<span class="pl-s3">mpc_err_t</span> *x, <span class="pl-st">char</span> *expected) {</td>
-      </tr>
-      <tr>
-        <td id="L74" class="blob-num js-line-number" data-line-number="74"></td>
-        <td id="LC74" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L75" class="blob-num js-line-number" data-line-number="75"></td>
-        <td id="LC75" class="blob-code js-file-line">  <span class="pl-st">int</span> i;</td>
-      </tr>
-      <tr>
-        <td id="L76" class="blob-num js-line-number" data-line-number="76"></td>
-        <td id="LC76" class="blob-code js-file-line">  <span class="pl-k">for</span> (i = <span class="pl-c1">0</span>; i &lt; x-&gt;expected_num; i++) {</td>
-      </tr>
-      <tr>
-        <td id="L77" class="blob-num js-line-number" data-line-number="77"></td>
-        <td id="LC77" class="blob-code js-file-line">    <span class="pl-k">if</span> (<span class="pl-s3">strcmp</span>(x-&gt;expected[i], expected) == <span class="pl-c1">0</span>) { <span class="pl-k">return</span> <span class="pl-c1">1</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L78" class="blob-num js-line-number" data-line-number="78"></td>
-        <td id="LC78" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L79" class="blob-num js-line-number" data-line-number="79"></td>
-        <td id="LC79" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L80" class="blob-num js-line-number" data-line-number="80"></td>
-        <td id="LC80" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L81" class="blob-num js-line-number" data-line-number="81"></td>
-        <td id="LC81" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L82" class="blob-num js-line-number" data-line-number="82"></td>
-        <td id="LC82" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L83" class="blob-num js-line-number" data-line-number="83"></td>
-        <td id="LC83" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">void</span> <span class="pl-en">mpc_err_add_expected</span>(<span class="pl-s3">mpc_err_t</span> *x, <span class="pl-st">char</span> *expected) {</td>
-      </tr>
-      <tr>
-        <td id="L84" class="blob-num js-line-number" data-line-number="84"></td>
-        <td id="LC84" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L85" class="blob-num js-line-number" data-line-number="85"></td>
-        <td id="LC85" class="blob-code js-file-line">  x-&gt;expected_num++;</td>
-      </tr>
-      <tr>
-        <td id="L86" class="blob-num js-line-number" data-line-number="86"></td>
-        <td id="LC86" class="blob-code js-file-line">  x-&gt;expected = <span class="pl-s3">realloc</span>(x-&gt;expected, <span class="pl-k">sizeof</span>(<span class="pl-st">char</span>*) * x-&gt;expected_num);</td>
-      </tr>
-      <tr>
-        <td id="L87" class="blob-num js-line-number" data-line-number="87"></td>
-        <td id="LC87" class="blob-code js-file-line">  x-&gt;expected[x-&gt;expected_num-<span class="pl-c1">1</span>] = <span class="pl-s3">malloc</span>(<span class="pl-s3">strlen</span>(expected) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L88" class="blob-num js-line-number" data-line-number="88"></td>
-        <td id="LC88" class="blob-code js-file-line">  <span class="pl-s3">strcpy</span>(x-&gt;expected[x-&gt;expected_num-<span class="pl-c1">1</span>], expected);</td>
-      </tr>
-      <tr>
-        <td id="L89" class="blob-num js-line-number" data-line-number="89"></td>
-        <td id="LC89" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L90" class="blob-num js-line-number" data-line-number="90"></td>
-        <td id="LC90" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L91" class="blob-num js-line-number" data-line-number="91"></td>
-        <td id="LC91" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L92" class="blob-num js-line-number" data-line-number="92"></td>
-        <td id="LC92" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">void</span> <span class="pl-en">mpc_err_clear_expected</span>(<span class="pl-s3">mpc_err_t</span> *x, <span class="pl-st">char</span> *expected) {</td>
-      </tr>
-      <tr>
-        <td id="L93" class="blob-num js-line-number" data-line-number="93"></td>
-        <td id="LC93" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L94" class="blob-num js-line-number" data-line-number="94"></td>
-        <td id="LC94" class="blob-code js-file-line">  <span class="pl-st">int</span> i;</td>
-      </tr>
-      <tr>
-        <td id="L95" class="blob-num js-line-number" data-line-number="95"></td>
-        <td id="LC95" class="blob-code js-file-line">  <span class="pl-k">for</span> (i = <span class="pl-c1">0</span>; i &lt; x-&gt;expected_num; i++) {</td>
-      </tr>
-      <tr>
-        <td id="L96" class="blob-num js-line-number" data-line-number="96"></td>
-        <td id="LC96" class="blob-code js-file-line">    <span class="pl-s3">free</span>(x-&gt;expected[i]);</td>
-      </tr>
-      <tr>
-        <td id="L97" class="blob-num js-line-number" data-line-number="97"></td>
-        <td id="LC97" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L98" class="blob-num js-line-number" data-line-number="98"></td>
-        <td id="LC98" class="blob-code js-file-line">  x-&gt;expected_num = <span class="pl-c1">1</span>;</td>
-      </tr>
-      <tr>
-        <td id="L99" class="blob-num js-line-number" data-line-number="99"></td>
-        <td id="LC99" class="blob-code js-file-line">  x-&gt;expected = <span class="pl-s3">realloc</span>(x-&gt;expected, <span class="pl-k">sizeof</span>(<span class="pl-st">char</span>*) * x-&gt;expected_num);</td>
-      </tr>
-      <tr>
-        <td id="L100" class="blob-num js-line-number" data-line-number="100"></td>
-        <td id="LC100" class="blob-code js-file-line">  x-&gt;expected[<span class="pl-c1">0</span>] = <span class="pl-s3">malloc</span>(<span class="pl-s3">strlen</span>(expected) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L101" class="blob-num js-line-number" data-line-number="101"></td>
-        <td id="LC101" class="blob-code js-file-line">  <span class="pl-s3">strcpy</span>(x-&gt;expected[<span class="pl-c1">0</span>], expected);</td>
-      </tr>
-      <tr>
-        <td id="L102" class="blob-num js-line-number" data-line-number="102"></td>
-        <td id="LC102" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L103" class="blob-num js-line-number" data-line-number="103"></td>
-        <td id="LC103" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L104" class="blob-num js-line-number" data-line-number="104"></td>
-        <td id="LC104" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L105" class="blob-num js-line-number" data-line-number="105"></td>
-        <td id="LC105" class="blob-code js-file-line"><span class="pl-st">void</span> <span class="pl-en">mpc_err_print</span>(<span class="pl-s3">mpc_err_t</span> *x) {</td>
-      </tr>
-      <tr>
-        <td id="L106" class="blob-num js-line-number" data-line-number="106"></td>
-        <td id="LC106" class="blob-code js-file-line">  <span class="pl-s3">mpc_err_print_to</span>(x, stdout);</td>
-      </tr>
-      <tr>
-        <td id="L107" class="blob-num js-line-number" data-line-number="107"></td>
-        <td id="LC107" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L108" class="blob-num js-line-number" data-line-number="108"></td>
-        <td id="LC108" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L109" class="blob-num js-line-number" data-line-number="109"></td>
-        <td id="LC109" class="blob-code js-file-line"><span class="pl-st">void</span> <span class="pl-en">mpc_err_print_to</span>(<span class="pl-s3">mpc_err_t</span> *x, <span class="pl-s3">FILE</span> *f) {</td>
-      </tr>
-      <tr>
-        <td id="L110" class="blob-num js-line-number" data-line-number="110"></td>
-        <td id="LC110" class="blob-code js-file-line">  <span class="pl-st">char</span> *str = <span class="pl-s3">mpc_err_string</span>(x);</td>
-      </tr>
-      <tr>
-        <td id="L111" class="blob-num js-line-number" data-line-number="111"></td>
-        <td id="LC111" class="blob-code js-file-line">  <span class="pl-s3">fprintf</span>(f, <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-c1">%s</span><span class="pl-pds">&quot;</span></span>, str);</td>
-      </tr>
-      <tr>
-        <td id="L112" class="blob-num js-line-number" data-line-number="112"></td>
-        <td id="LC112" class="blob-code js-file-line">  <span class="pl-s3">free</span>(str);</td>
-      </tr>
-      <tr>
-        <td id="L113" class="blob-num js-line-number" data-line-number="113"></td>
-        <td id="LC113" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L114" class="blob-num js-line-number" data-line-number="114"></td>
-        <td id="LC114" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L115" class="blob-num js-line-number" data-line-number="115"></td>
-        <td id="LC115" class="blob-code js-file-line"><span class="pl-st">void</span> <span class="pl-en">mpc_err_string_cat</span>(<span class="pl-st">char</span> *buffer, <span class="pl-st">int</span> *pos, <span class="pl-st">int</span> *max, <span class="pl-st">char</span> <span class="pl-s">const</span> *fmt, ...) {</td>
-      </tr>
-      <tr>
-        <td id="L116" class="blob-num js-line-number" data-line-number="116"></td>
-        <td id="LC116" class="blob-code js-file-line">  <span class="pl-c">/* TODO: Error Checking on Length */</span></td>
-      </tr>
-      <tr>
-        <td id="L117" class="blob-num js-line-number" data-line-number="117"></td>
-        <td id="LC117" class="blob-code js-file-line">  <span class="pl-st">int</span> left = ((*max) - (*pos));</td>
-      </tr>
-      <tr>
-        <td id="L118" class="blob-num js-line-number" data-line-number="118"></td>
-        <td id="LC118" class="blob-code js-file-line">  <span class="pl-s3">va_list</span> va;</td>
-      </tr>
-      <tr>
-        <td id="L119" class="blob-num js-line-number" data-line-number="119"></td>
-        <td id="LC119" class="blob-code js-file-line">  <span class="pl-s3">va_start</span>(va, fmt);</td>
-      </tr>
-      <tr>
-        <td id="L120" class="blob-num js-line-number" data-line-number="120"></td>
-        <td id="LC120" class="blob-code js-file-line">  <span class="pl-k">if</span> (left &lt; <span class="pl-c1">0</span>) { left = <span class="pl-c1">0</span>;}</td>
-      </tr>
-      <tr>
-        <td id="L121" class="blob-num js-line-number" data-line-number="121"></td>
-        <td id="LC121" class="blob-code js-file-line">  (*pos) += <span class="pl-s3">vsprintf</span>(buffer + (*pos), fmt, va);</td>
-      </tr>
-      <tr>
-        <td id="L122" class="blob-num js-line-number" data-line-number="122"></td>
-        <td id="LC122" class="blob-code js-file-line">  <span class="pl-s3">va_end</span>(va);</td>
-      </tr>
-      <tr>
-        <td id="L123" class="blob-num js-line-number" data-line-number="123"></td>
-        <td id="LC123" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L124" class="blob-num js-line-number" data-line-number="124"></td>
-        <td id="LC124" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L125" class="blob-num js-line-number" data-line-number="125"></td>
-        <td id="LC125" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">char</span> char_unescape_buffer[<span class="pl-c1">3</span>];</td>
-      </tr>
-      <tr>
-        <td id="L126" class="blob-num js-line-number" data-line-number="126"></td>
-        <td id="LC126" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L127" class="blob-num js-line-number" data-line-number="127"></td>
-        <td id="LC127" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s">const</span> <span class="pl-st">char</span> *<span class="pl-en">mpc_err_char_unescape</span>(<span class="pl-st">char</span> c) {</td>
-      </tr>
-      <tr>
-        <td id="L128" class="blob-num js-line-number" data-line-number="128"></td>
-        <td id="LC128" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L129" class="blob-num js-line-number" data-line-number="129"></td>
-        <td id="LC129" class="blob-code js-file-line">  char_unescape_buffer[<span class="pl-c1">0</span>] = <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-cce">\&#39;</span><span class="pl-pds">&#39;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L130" class="blob-num js-line-number" data-line-number="130"></td>
-        <td id="LC130" class="blob-code js-file-line">  char_unescape_buffer[<span class="pl-c1">1</span>] = <span class="pl-s1"><span class="pl-pds">&#39;</span> <span class="pl-pds">&#39;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L131" class="blob-num js-line-number" data-line-number="131"></td>
-        <td id="LC131" class="blob-code js-file-line">  char_unescape_buffer[<span class="pl-c1">2</span>] = <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-cce">\&#39;</span><span class="pl-pds">&#39;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L132" class="blob-num js-line-number" data-line-number="132"></td>
-        <td id="LC132" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L133" class="blob-num js-line-number" data-line-number="133"></td>
-        <td id="LC133" class="blob-code js-file-line">  <span class="pl-k">switch</span> (c) {</td>
-      </tr>
-      <tr>
-        <td id="L134" class="blob-num js-line-number" data-line-number="134"></td>
-        <td id="LC134" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L135" class="blob-num js-line-number" data-line-number="135"></td>
-        <td id="LC135" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-cce">\a</span><span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s1"><span class="pl-pds">&quot;</span>bell<span class="pl-pds">&quot;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L136" class="blob-num js-line-number" data-line-number="136"></td>
-        <td id="LC136" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-cce">\b</span><span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s1"><span class="pl-pds">&quot;</span>backspace<span class="pl-pds">&quot;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L137" class="blob-num js-line-number" data-line-number="137"></td>
-        <td id="LC137" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-cce">\f</span><span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s1"><span class="pl-pds">&quot;</span>formfeed<span class="pl-pds">&quot;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L138" class="blob-num js-line-number" data-line-number="138"></td>
-        <td id="LC138" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-cce">\r</span><span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s1"><span class="pl-pds">&quot;</span>carriage return<span class="pl-pds">&quot;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L139" class="blob-num js-line-number" data-line-number="139"></td>
-        <td id="LC139" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-cce">\v</span><span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s1"><span class="pl-pds">&quot;</span>vertical tab<span class="pl-pds">&quot;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L140" class="blob-num js-line-number" data-line-number="140"></td>
-        <td id="LC140" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-ii">\0</span><span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s1"><span class="pl-pds">&quot;</span>end of input<span class="pl-pds">&quot;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L141" class="blob-num js-line-number" data-line-number="141"></td>
-        <td id="LC141" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-cce">\n</span><span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s1"><span class="pl-pds">&quot;</span>newline<span class="pl-pds">&quot;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L142" class="blob-num js-line-number" data-line-number="142"></td>
-        <td id="LC142" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-cce">\t</span><span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s1"><span class="pl-pds">&quot;</span>tab<span class="pl-pds">&quot;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L143" class="blob-num js-line-number" data-line-number="143"></td>
-        <td id="LC143" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span> <span class="pl-pds">&#39;</span></span> : <span class="pl-k">return</span> <span class="pl-s1"><span class="pl-pds">&quot;</span>space<span class="pl-pds">&quot;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L144" class="blob-num js-line-number" data-line-number="144"></td>
-        <td id="LC144" class="blob-code js-file-line">    <span class="pl-k">default</span>:</td>
-      </tr>
-      <tr>
-        <td id="L145" class="blob-num js-line-number" data-line-number="145"></td>
-        <td id="LC145" class="blob-code js-file-line">      char_unescape_buffer[<span class="pl-c1">1</span>] = c;</td>
-      </tr>
-      <tr>
-        <td id="L146" class="blob-num js-line-number" data-line-number="146"></td>
-        <td id="LC146" class="blob-code js-file-line">      <span class="pl-k">return</span> char_unescape_buffer;</td>
-      </tr>
-      <tr>
-        <td id="L147" class="blob-num js-line-number" data-line-number="147"></td>
-        <td id="LC147" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L148" class="blob-num js-line-number" data-line-number="148"></td>
-        <td id="LC148" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L149" class="blob-num js-line-number" data-line-number="149"></td>
-        <td id="LC149" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L150" class="blob-num js-line-number" data-line-number="150"></td>
-        <td id="LC150" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L151" class="blob-num js-line-number" data-line-number="151"></td>
-        <td id="LC151" class="blob-code js-file-line"><span class="pl-st">char</span> *<span class="pl-en">mpc_err_string</span>(<span class="pl-s3">mpc_err_t</span> *x) {</td>
-      </tr>
-      <tr>
-        <td id="L152" class="blob-num js-line-number" data-line-number="152"></td>
-        <td id="LC152" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L153" class="blob-num js-line-number" data-line-number="153"></td>
-        <td id="LC153" class="blob-code js-file-line">  <span class="pl-st">char</span> *buffer = <span class="pl-s3">calloc</span>(<span class="pl-c1">1</span>, <span class="pl-c1">1024</span>);</td>
-      </tr>
-      <tr>
-        <td id="L154" class="blob-num js-line-number" data-line-number="154"></td>
-        <td id="LC154" class="blob-code js-file-line">  <span class="pl-st">int</span> max = <span class="pl-c1">1023</span>;</td>
-      </tr>
-      <tr>
-        <td id="L155" class="blob-num js-line-number" data-line-number="155"></td>
-        <td id="LC155" class="blob-code js-file-line">  <span class="pl-st">int</span> pos = <span class="pl-c1">0</span>; </td>
-      </tr>
-      <tr>
-        <td id="L156" class="blob-num js-line-number" data-line-number="156"></td>
-        <td id="LC156" class="blob-code js-file-line">  <span class="pl-st">int</span> i;</td>
-      </tr>
-      <tr>
-        <td id="L157" class="blob-num js-line-number" data-line-number="157"></td>
-        <td id="LC157" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L158" class="blob-num js-line-number" data-line-number="158"></td>
-        <td id="LC158" class="blob-code js-file-line">  <span class="pl-k">if</span> (x-&gt;failure) {</td>
-      </tr>
-      <tr>
-        <td id="L159" class="blob-num js-line-number" data-line-number="159"></td>
-        <td id="LC159" class="blob-code js-file-line">    <span class="pl-s3">mpc_err_string_cat</span>(buffer, &amp;pos, &amp;max,</td>
-      </tr>
-      <tr>
-        <td id="L160" class="blob-num js-line-number" data-line-number="160"></td>
-        <td id="LC160" class="blob-code js-file-line">    <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-c1">%s</span>: error: <span class="pl-c1">%s</span><span class="pl-cce">\n</span><span class="pl-pds">&quot;</span></span>, x-&gt;filename, x-&gt;failure);</td>
-      </tr>
-      <tr>
-        <td id="L161" class="blob-num js-line-number" data-line-number="161"></td>
-        <td id="LC161" class="blob-code js-file-line">    <span class="pl-k">return</span> buffer;</td>
-      </tr>
-      <tr>
-        <td id="L162" class="blob-num js-line-number" data-line-number="162"></td>
-        <td id="LC162" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L163" class="blob-num js-line-number" data-line-number="163"></td>
-        <td id="LC163" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L164" class="blob-num js-line-number" data-line-number="164"></td>
-        <td id="LC164" class="blob-code js-file-line">  <span class="pl-s3">mpc_err_string_cat</span>(buffer, &amp;pos, &amp;max, </td>
-      </tr>
-      <tr>
-        <td id="L165" class="blob-num js-line-number" data-line-number="165"></td>
-        <td id="LC165" class="blob-code js-file-line">    <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-c1">%s</span>:<span class="pl-c1">%i</span>:<span class="pl-c1">%i</span>: error: expected <span class="pl-pds">&quot;</span></span>, x-&gt;filename, x-&gt;state.<span class="pl-vo">row</span>+<span class="pl-c1">1</span>, x-&gt;state.<span class="pl-vo">col</span>+<span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L166" class="blob-num js-line-number" data-line-number="166"></td>
-        <td id="LC166" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L167" class="blob-num js-line-number" data-line-number="167"></td>
-        <td id="LC167" class="blob-code js-file-line">  <span class="pl-k">if</span> (x-&gt;expected_num == <span class="pl-c1">0</span>) { <span class="pl-s3">mpc_err_string_cat</span>(buffer, &amp;pos, &amp;max, <span class="pl-s1"><span class="pl-pds">&quot;</span>ERROR: NOTHING EXPECTED<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L168" class="blob-num js-line-number" data-line-number="168"></td>
-        <td id="LC168" class="blob-code js-file-line">  <span class="pl-k">if</span> (x-&gt;expected_num == <span class="pl-c1">1</span>) { <span class="pl-s3">mpc_err_string_cat</span>(buffer, &amp;pos, &amp;max, <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-c1">%s</span><span class="pl-pds">&quot;</span></span>, x-&gt;expected[<span class="pl-c1">0</span>]); }</td>
-      </tr>
-      <tr>
-        <td id="L169" class="blob-num js-line-number" data-line-number="169"></td>
-        <td id="LC169" class="blob-code js-file-line">  <span class="pl-k">if</span> (x-&gt;expected_num &gt;= <span class="pl-c1">2</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L170" class="blob-num js-line-number" data-line-number="170"></td>
-        <td id="LC170" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L171" class="blob-num js-line-number" data-line-number="171"></td>
-        <td id="LC171" class="blob-code js-file-line">    <span class="pl-k">for</span> (i = <span class="pl-c1">0</span>; i &lt; x-&gt;expected_num-<span class="pl-c1">2</span>; i++) {</td>
-      </tr>
-      <tr>
-        <td id="L172" class="blob-num js-line-number" data-line-number="172"></td>
-        <td id="LC172" class="blob-code js-file-line">      <span class="pl-s3">mpc_err_string_cat</span>(buffer, &amp;pos, &amp;max, <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-c1">%s</span>, <span class="pl-pds">&quot;</span></span>, x-&gt;expected[i]);</td>
-      </tr>
-      <tr>
-        <td id="L173" class="blob-num js-line-number" data-line-number="173"></td>
-        <td id="LC173" class="blob-code js-file-line">    } </td>
-      </tr>
-      <tr>
-        <td id="L174" class="blob-num js-line-number" data-line-number="174"></td>
-        <td id="LC174" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L175" class="blob-num js-line-number" data-line-number="175"></td>
-        <td id="LC175" class="blob-code js-file-line">    <span class="pl-s3">mpc_err_string_cat</span>(buffer, &amp;pos, &amp;max, <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-c1">%s</span> or <span class="pl-c1">%s</span><span class="pl-pds">&quot;</span></span>, </td>
-      </tr>
-      <tr>
-        <td id="L176" class="blob-num js-line-number" data-line-number="176"></td>
-        <td id="LC176" class="blob-code js-file-line">      x-&gt;expected[x-&gt;expected_num-<span class="pl-c1">2</span>], </td>
-      </tr>
-      <tr>
-        <td id="L177" class="blob-num js-line-number" data-line-number="177"></td>
-        <td id="LC177" class="blob-code js-file-line">      x-&gt;expected[x-&gt;expected_num-<span class="pl-c1">1</span>]);</td>
-      </tr>
-      <tr>
-        <td id="L178" class="blob-num js-line-number" data-line-number="178"></td>
-        <td id="LC178" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L179" class="blob-num js-line-number" data-line-number="179"></td>
-        <td id="LC179" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L180" class="blob-num js-line-number" data-line-number="180"></td>
-        <td id="LC180" class="blob-code js-file-line">  <span class="pl-s3">mpc_err_string_cat</span>(buffer, &amp;pos, &amp;max, <span class="pl-s1"><span class="pl-pds">&quot;</span> at <span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L181" class="blob-num js-line-number" data-line-number="181"></td>
-        <td id="LC181" class="blob-code js-file-line">  <span class="pl-s3">mpc_err_string_cat</span>(buffer, &amp;pos, &amp;max, <span class="pl-s3">mpc_err_char_unescape</span>(x-&gt;recieved));</td>
-      </tr>
-      <tr>
-        <td id="L182" class="blob-num js-line-number" data-line-number="182"></td>
-        <td id="LC182" class="blob-code js-file-line">  <span class="pl-s3">mpc_err_string_cat</span>(buffer, &amp;pos, &amp;max, <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-cce">\n</span><span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L183" class="blob-num js-line-number" data-line-number="183"></td>
-        <td id="LC183" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L184" class="blob-num js-line-number" data-line-number="184"></td>
-        <td id="LC184" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">realloc</span>(buffer, <span class="pl-s3">strlen</span>(buffer) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L185" class="blob-num js-line-number" data-line-number="185"></td>
-        <td id="LC185" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L186" class="blob-num js-line-number" data-line-number="186"></td>
-        <td id="LC186" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L187" class="blob-num js-line-number" data-line-number="187"></td>
-        <td id="LC187" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_err_t</span> *<span class="pl-en">mpc_err_or</span>(<span class="pl-s3">mpc_err_t</span>** x, <span class="pl-st">int</span> n) {</td>
-      </tr>
-      <tr>
-        <td id="L188" class="blob-num js-line-number" data-line-number="188"></td>
-        <td id="LC188" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L189" class="blob-num js-line-number" data-line-number="189"></td>
-        <td id="LC189" class="blob-code js-file-line">  <span class="pl-st">int</span> i, j;</td>
-      </tr>
-      <tr>
-        <td id="L190" class="blob-num js-line-number" data-line-number="190"></td>
-        <td id="LC190" class="blob-code js-file-line">  <span class="pl-s3">mpc_err_t</span> *e = <span class="pl-s3">malloc</span>(<span class="pl-k">sizeof</span>(<span class="pl-s3">mpc_err_t</span>));</td>
-      </tr>
-      <tr>
-        <td id="L191" class="blob-num js-line-number" data-line-number="191"></td>
-        <td id="LC191" class="blob-code js-file-line">  e-&gt;state = <span class="pl-s3">mpc_state_invalid</span>();</td>
-      </tr>
-      <tr>
-        <td id="L192" class="blob-num js-line-number" data-line-number="192"></td>
-        <td id="LC192" class="blob-code js-file-line">  e-&gt;expected_num = <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L193" class="blob-num js-line-number" data-line-number="193"></td>
-        <td id="LC193" class="blob-code js-file-line">  e-&gt;expected = <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L194" class="blob-num js-line-number" data-line-number="194"></td>
-        <td id="LC194" class="blob-code js-file-line">  e-&gt;failure = <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L195" class="blob-num js-line-number" data-line-number="195"></td>
-        <td id="LC195" class="blob-code js-file-line">  e-&gt;filename = <span class="pl-s3">malloc</span>(<span class="pl-s3">strlen</span>(x[<span class="pl-c1">0</span>]-&gt;filename)+<span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L196" class="blob-num js-line-number" data-line-number="196"></td>
-        <td id="LC196" class="blob-code js-file-line">  <span class="pl-s3">strcpy</span>(e-&gt;filename, x[<span class="pl-c1">0</span>]-&gt;filename);</td>
-      </tr>
-      <tr>
-        <td id="L197" class="blob-num js-line-number" data-line-number="197"></td>
-        <td id="LC197" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L198" class="blob-num js-line-number" data-line-number="198"></td>
-        <td id="LC198" class="blob-code js-file-line">  <span class="pl-k">for</span> (i = <span class="pl-c1">0</span>; i &lt; n; i++) {</td>
-      </tr>
-      <tr>
-        <td id="L199" class="blob-num js-line-number" data-line-number="199"></td>
-        <td id="LC199" class="blob-code js-file-line">    <span class="pl-k">if</span> (x[i]-&gt;state.<span class="pl-vo">pos</span> &gt; e-&gt;state.<span class="pl-vo">pos</span>) { e-&gt;state = x[i]-&gt;state; }</td>
-      </tr>
-      <tr>
-        <td id="L200" class="blob-num js-line-number" data-line-number="200"></td>
-        <td id="LC200" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L201" class="blob-num js-line-number" data-line-number="201"></td>
-        <td id="LC201" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L202" class="blob-num js-line-number" data-line-number="202"></td>
-        <td id="LC202" class="blob-code js-file-line">  <span class="pl-k">for</span> (i = <span class="pl-c1">0</span>; i &lt; n; i++) {</td>
-      </tr>
-      <tr>
-        <td id="L203" class="blob-num js-line-number" data-line-number="203"></td>
-        <td id="LC203" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L204" class="blob-num js-line-number" data-line-number="204"></td>
-        <td id="LC204" class="blob-code js-file-line">    <span class="pl-k">if</span> (x[i]-&gt;state.<span class="pl-vo">pos</span> &lt; e-&gt;state.<span class="pl-vo">pos</span>) { <span class="pl-k">continue</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L205" class="blob-num js-line-number" data-line-number="205"></td>
-        <td id="LC205" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L206" class="blob-num js-line-number" data-line-number="206"></td>
-        <td id="LC206" class="blob-code js-file-line">    <span class="pl-k">if</span> (x[i]-&gt;failure) {</td>
-      </tr>
-      <tr>
-        <td id="L207" class="blob-num js-line-number" data-line-number="207"></td>
-        <td id="LC207" class="blob-code js-file-line">      e-&gt;failure = <span class="pl-s3">malloc</span>(<span class="pl-s3">strlen</span>(x[i]-&gt;failure)+<span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L208" class="blob-num js-line-number" data-line-number="208"></td>
-        <td id="LC208" class="blob-code js-file-line">      <span class="pl-s3">strcpy</span>(e-&gt;failure, x[i]-&gt;failure);</td>
-      </tr>
-      <tr>
-        <td id="L209" class="blob-num js-line-number" data-line-number="209"></td>
-        <td id="LC209" class="blob-code js-file-line">      <span class="pl-k">break</span>;</td>
-      </tr>
-      <tr>
-        <td id="L210" class="blob-num js-line-number" data-line-number="210"></td>
-        <td id="LC210" class="blob-code js-file-line">    }</td>
-      </tr>
-      <tr>
-        <td id="L211" class="blob-num js-line-number" data-line-number="211"></td>
-        <td id="LC211" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L212" class="blob-num js-line-number" data-line-number="212"></td>
-        <td id="LC212" class="blob-code js-file-line">    e-&gt;recieved = x[i]-&gt;recieved;</td>
-      </tr>
-      <tr>
-        <td id="L213" class="blob-num js-line-number" data-line-number="213"></td>
-        <td id="LC213" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L214" class="blob-num js-line-number" data-line-number="214"></td>
-        <td id="LC214" class="blob-code js-file-line">    <span class="pl-k">for</span> (j = <span class="pl-c1">0</span>; j &lt; x[i]-&gt;expected_num; j++) {</td>
-      </tr>
-      <tr>
-        <td id="L215" class="blob-num js-line-number" data-line-number="215"></td>
-        <td id="LC215" class="blob-code js-file-line">      <span class="pl-k">if</span> (!<span class="pl-s3">mpc_err_contains_expected</span>(e, x[i]-&gt;expected[j])) { <span class="pl-s3">mpc_err_add_expected</span>(e, x[i]-&gt;expected[j]); }</td>
-      </tr>
-      <tr>
-        <td id="L216" class="blob-num js-line-number" data-line-number="216"></td>
-        <td id="LC216" class="blob-code js-file-line">    }</td>
-      </tr>
-      <tr>
-        <td id="L217" class="blob-num js-line-number" data-line-number="217"></td>
-        <td id="LC217" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L218" class="blob-num js-line-number" data-line-number="218"></td>
-        <td id="LC218" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L219" class="blob-num js-line-number" data-line-number="219"></td>
-        <td id="LC219" class="blob-code js-file-line">  <span class="pl-k">for</span> (i = <span class="pl-c1">0</span>; i &lt; n; i++) {</td>
-      </tr>
-      <tr>
-        <td id="L220" class="blob-num js-line-number" data-line-number="220"></td>
-        <td id="LC220" class="blob-code js-file-line">    <span class="pl-s3">mpc_err_delete</span>(x[i]);</td>
-      </tr>
-      <tr>
-        <td id="L221" class="blob-num js-line-number" data-line-number="221"></td>
-        <td id="LC221" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L222" class="blob-num js-line-number" data-line-number="222"></td>
-        <td id="LC222" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L223" class="blob-num js-line-number" data-line-number="223"></td>
-        <td id="LC223" class="blob-code js-file-line">  <span class="pl-k">return</span> e;</td>
-      </tr>
-      <tr>
-        <td id="L224" class="blob-num js-line-number" data-line-number="224"></td>
-        <td id="LC224" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L225" class="blob-num js-line-number" data-line-number="225"></td>
-        <td id="LC225" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L226" class="blob-num js-line-number" data-line-number="226"></td>
-        <td id="LC226" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_err_t</span> *<span class="pl-en">mpc_err_repeat</span>(<span class="pl-s3">mpc_err_t</span> *x, <span class="pl-s">const</span> <span class="pl-st">char</span> *prefix) {</td>
-      </tr>
-      <tr>
-        <td id="L227" class="blob-num js-line-number" data-line-number="227"></td>
-        <td id="LC227" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L228" class="blob-num js-line-number" data-line-number="228"></td>
-        <td id="LC228" class="blob-code js-file-line">  <span class="pl-st">int</span> i;</td>
-      </tr>
-      <tr>
-        <td id="L229" class="blob-num js-line-number" data-line-number="229"></td>
-        <td id="LC229" class="blob-code js-file-line">  <span class="pl-st">char</span> *expect = <span class="pl-s3">malloc</span>(<span class="pl-s3">strlen</span>(prefix) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L230" class="blob-num js-line-number" data-line-number="230"></td>
-        <td id="LC230" class="blob-code js-file-line">  <span class="pl-s3">strcpy</span>(expect, prefix);</td>
-      </tr>
-      <tr>
-        <td id="L231" class="blob-num js-line-number" data-line-number="231"></td>
-        <td id="LC231" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L232" class="blob-num js-line-number" data-line-number="232"></td>
-        <td id="LC232" class="blob-code js-file-line">  <span class="pl-k">if</span> (x-&gt;expected_num == <span class="pl-c1">1</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L233" class="blob-num js-line-number" data-line-number="233"></td>
-        <td id="LC233" class="blob-code js-file-line">    expect = <span class="pl-s3">realloc</span>(expect, <span class="pl-s3">strlen</span>(expect) + <span class="pl-s3">strlen</span>(x-&gt;expected[<span class="pl-c1">0</span>]) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L234" class="blob-num js-line-number" data-line-number="234"></td>
-        <td id="LC234" class="blob-code js-file-line">    <span class="pl-s3">strcat</span>(expect, x-&gt;expected[<span class="pl-c1">0</span>]);</td>
-      </tr>
-      <tr>
-        <td id="L235" class="blob-num js-line-number" data-line-number="235"></td>
-        <td id="LC235" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L236" class="blob-num js-line-number" data-line-number="236"></td>
-        <td id="LC236" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L237" class="blob-num js-line-number" data-line-number="237"></td>
-        <td id="LC237" class="blob-code js-file-line">  <span class="pl-k">if</span> (x-&gt;expected_num &gt; <span class="pl-c1">1</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L238" class="blob-num js-line-number" data-line-number="238"></td>
-        <td id="LC238" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L239" class="blob-num js-line-number" data-line-number="239"></td>
-        <td id="LC239" class="blob-code js-file-line">    <span class="pl-k">for</span> (i = <span class="pl-c1">0</span>; i &lt; x-&gt;expected_num-<span class="pl-c1">2</span>; i++) {</td>
-      </tr>
-      <tr>
-        <td id="L240" class="blob-num js-line-number" data-line-number="240"></td>
-        <td id="LC240" class="blob-code js-file-line">      expect = <span class="pl-s3">realloc</span>(expect, <span class="pl-s3">strlen</span>(expect) + <span class="pl-s3">strlen</span>(x-&gt;expected[i]) + <span class="pl-s3">strlen</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>, <span class="pl-pds">&quot;</span></span>) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L241" class="blob-num js-line-number" data-line-number="241"></td>
-        <td id="LC241" class="blob-code js-file-line">      <span class="pl-s3">strcat</span>(expect, x-&gt;expected[i]);</td>
-      </tr>
-      <tr>
-        <td id="L242" class="blob-num js-line-number" data-line-number="242"></td>
-        <td id="LC242" class="blob-code js-file-line">      <span class="pl-s3">strcat</span>(expect, <span class="pl-s1"><span class="pl-pds">&quot;</span>, <span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L243" class="blob-num js-line-number" data-line-number="243"></td>
-        <td id="LC243" class="blob-code js-file-line">    }</td>
-      </tr>
-      <tr>
-        <td id="L244" class="blob-num js-line-number" data-line-number="244"></td>
-        <td id="LC244" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L245" class="blob-num js-line-number" data-line-number="245"></td>
-        <td id="LC245" class="blob-code js-file-line">    expect = <span class="pl-s3">realloc</span>(expect, <span class="pl-s3">strlen</span>(expect) + <span class="pl-s3">strlen</span>(x-&gt;expected[x-&gt;expected_num-<span class="pl-c1">2</span>]) + <span class="pl-s3">strlen</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span> or <span class="pl-pds">&quot;</span></span>) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L246" class="blob-num js-line-number" data-line-number="246"></td>
-        <td id="LC246" class="blob-code js-file-line">    <span class="pl-s3">strcat</span>(expect, x-&gt;expected[x-&gt;expected_num-<span class="pl-c1">2</span>]);</td>
-      </tr>
-      <tr>
-        <td id="L247" class="blob-num js-line-number" data-line-number="247"></td>
-        <td id="LC247" class="blob-code js-file-line">    <span class="pl-s3">strcat</span>(expect, <span class="pl-s1"><span class="pl-pds">&quot;</span> or <span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L248" class="blob-num js-line-number" data-line-number="248"></td>
-        <td id="LC248" class="blob-code js-file-line">    expect = <span class="pl-s3">realloc</span>(expect, <span class="pl-s3">strlen</span>(expect) + <span class="pl-s3">strlen</span>(x-&gt;expected[x-&gt;expected_num-<span class="pl-c1">1</span>]) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L249" class="blob-num js-line-number" data-line-number="249"></td>
-        <td id="LC249" class="blob-code js-file-line">    <span class="pl-s3">strcat</span>(expect, x-&gt;expected[x-&gt;expected_num-<span class="pl-c1">1</span>]);</td>
-      </tr>
-      <tr>
-        <td id="L250" class="blob-num js-line-number" data-line-number="250"></td>
-        <td id="LC250" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L251" class="blob-num js-line-number" data-line-number="251"></td>
-        <td id="LC251" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L252" class="blob-num js-line-number" data-line-number="252"></td>
-        <td id="LC252" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L253" class="blob-num js-line-number" data-line-number="253"></td>
-        <td id="LC253" class="blob-code js-file-line">  <span class="pl-s3">mpc_err_clear_expected</span>(x, expect);</td>
-      </tr>
-      <tr>
-        <td id="L254" class="blob-num js-line-number" data-line-number="254"></td>
-        <td id="LC254" class="blob-code js-file-line">  <span class="pl-s3">free</span>(expect);</td>
-      </tr>
-      <tr>
-        <td id="L255" class="blob-num js-line-number" data-line-number="255"></td>
-        <td id="LC255" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L256" class="blob-num js-line-number" data-line-number="256"></td>
-        <td id="LC256" class="blob-code js-file-line">  <span class="pl-k">return</span> x;</td>
-      </tr>
-      <tr>
-        <td id="L257" class="blob-num js-line-number" data-line-number="257"></td>
-        <td id="LC257" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L258" class="blob-num js-line-number" data-line-number="258"></td>
-        <td id="LC258" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L259" class="blob-num js-line-number" data-line-number="259"></td>
-        <td id="LC259" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L260" class="blob-num js-line-number" data-line-number="260"></td>
-        <td id="LC260" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_err_t</span> *<span class="pl-en">mpc_err_many1</span>(<span class="pl-s3">mpc_err_t</span> *x) {</td>
-      </tr>
-      <tr>
-        <td id="L261" class="blob-num js-line-number" data-line-number="261"></td>
-        <td id="LC261" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">mpc_err_repeat</span>(x, <span class="pl-s1"><span class="pl-pds">&quot;</span>one or more of <span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L262" class="blob-num js-line-number" data-line-number="262"></td>
-        <td id="LC262" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L263" class="blob-num js-line-number" data-line-number="263"></td>
-        <td id="LC263" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L264" class="blob-num js-line-number" data-line-number="264"></td>
-        <td id="LC264" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_err_t</span> *<span class="pl-en">mpc_err_count</span>(<span class="pl-s3">mpc_err_t</span> *x, <span class="pl-st">int</span> n) {</td>
-      </tr>
-      <tr>
-        <td id="L265" class="blob-num js-line-number" data-line-number="265"></td>
-        <td id="LC265" class="blob-code js-file-line">  <span class="pl-s3">mpc_err_t</span> *y;</td>
-      </tr>
-      <tr>
-        <td id="L266" class="blob-num js-line-number" data-line-number="266"></td>
-        <td id="LC266" class="blob-code js-file-line">  <span class="pl-st">int</span> digits = n/<span class="pl-c1">10</span> + <span class="pl-c1">1</span>;</td>
-      </tr>
-      <tr>
-        <td id="L267" class="blob-num js-line-number" data-line-number="267"></td>
-        <td id="LC267" class="blob-code js-file-line">  <span class="pl-st">char</span> *prefix = <span class="pl-s3">malloc</span>(digits + <span class="pl-s3">strlen</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span> of <span class="pl-pds">&quot;</span></span>) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L268" class="blob-num js-line-number" data-line-number="268"></td>
-        <td id="LC268" class="blob-code js-file-line">  <span class="pl-s3">sprintf</span>(prefix, <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-c1">%i</span> of <span class="pl-pds">&quot;</span></span>, n);</td>
-      </tr>
-      <tr>
-        <td id="L269" class="blob-num js-line-number" data-line-number="269"></td>
-        <td id="LC269" class="blob-code js-file-line">  y = <span class="pl-s3">mpc_err_repeat</span>(x, prefix);</td>
-      </tr>
-      <tr>
-        <td id="L270" class="blob-num js-line-number" data-line-number="270"></td>
-        <td id="LC270" class="blob-code js-file-line">  <span class="pl-s3">free</span>(prefix);</td>
-      </tr>
-      <tr>
-        <td id="L271" class="blob-num js-line-number" data-line-number="271"></td>
-        <td id="LC271" class="blob-code js-file-line">  <span class="pl-k">return</span> y;</td>
-      </tr>
-      <tr>
-        <td id="L272" class="blob-num js-line-number" data-line-number="272"></td>
-        <td id="LC272" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L273" class="blob-num js-line-number" data-line-number="273"></td>
-        <td id="LC273" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L274" class="blob-num js-line-number" data-line-number="274"></td>
-        <td id="LC274" class="blob-code js-file-line"><span class="pl-c">/*</span></td>
-      </tr>
-      <tr>
-        <td id="L275" class="blob-num js-line-number" data-line-number="275"></td>
-        <td id="LC275" class="blob-code js-file-line"><span class="pl-c">** Input Type</span></td>
-      </tr>
-      <tr>
-        <td id="L276" class="blob-num js-line-number" data-line-number="276"></td>
-        <td id="LC276" class="blob-code js-file-line"><span class="pl-c">*/</span></td>
-      </tr>
-      <tr>
-        <td id="L277" class="blob-num js-line-number" data-line-number="277"></td>
-        <td id="LC277" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L278" class="blob-num js-line-number" data-line-number="278"></td>
-        <td id="LC278" class="blob-code js-file-line"><span class="pl-c">/*</span></td>
-      </tr>
-      <tr>
-        <td id="L279" class="blob-num js-line-number" data-line-number="279"></td>
-        <td id="LC279" class="blob-code js-file-line"><span class="pl-c">** In mpc the input type has three modes of </span></td>
-      </tr>
-      <tr>
-        <td id="L280" class="blob-num js-line-number" data-line-number="280"></td>
-        <td id="LC280" class="blob-code js-file-line"><span class="pl-c">** operation: String, File and Pipe.</span></td>
-      </tr>
-      <tr>
-        <td id="L281" class="blob-num js-line-number" data-line-number="281"></td>
-        <td id="LC281" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L282" class="blob-num js-line-number" data-line-number="282"></td>
-        <td id="LC282" class="blob-code js-file-line"><span class="pl-c">** String is easy. The whole contents are </span></td>
-      </tr>
-      <tr>
-        <td id="L283" class="blob-num js-line-number" data-line-number="283"></td>
-        <td id="LC283" class="blob-code js-file-line"><span class="pl-c">** loaded into a buffer and scanned through.</span></td>
-      </tr>
-      <tr>
-        <td id="L284" class="blob-num js-line-number" data-line-number="284"></td>
-        <td id="LC284" class="blob-code js-file-line"><span class="pl-c">** The cursor can jump around at will making </span></td>
-      </tr>
-      <tr>
-        <td id="L285" class="blob-num js-line-number" data-line-number="285"></td>
-        <td id="LC285" class="blob-code js-file-line"><span class="pl-c">** backtracking easy.</span></td>
-      </tr>
-      <tr>
-        <td id="L286" class="blob-num js-line-number" data-line-number="286"></td>
-        <td id="LC286" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L287" class="blob-num js-line-number" data-line-number="287"></td>
-        <td id="LC287" class="blob-code js-file-line"><span class="pl-c">** The second is a File which is also somewhat</span></td>
-      </tr>
-      <tr>
-        <td id="L288" class="blob-num js-line-number" data-line-number="288"></td>
-        <td id="LC288" class="blob-code js-file-line"><span class="pl-c">** easy. The contents are never loaded into </span></td>
-      </tr>
-      <tr>
-        <td id="L289" class="blob-num js-line-number" data-line-number="289"></td>
-        <td id="LC289" class="blob-code js-file-line"><span class="pl-c">** memory but backtracking can still be achieved</span></td>
-      </tr>
-      <tr>
-        <td id="L290" class="blob-num js-line-number" data-line-number="290"></td>
-        <td id="LC290" class="blob-code js-file-line"><span class="pl-c">** by seeking in the file at different positions.</span></td>
-      </tr>
-      <tr>
-        <td id="L291" class="blob-num js-line-number" data-line-number="291"></td>
-        <td id="LC291" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L292" class="blob-num js-line-number" data-line-number="292"></td>
-        <td id="LC292" class="blob-code js-file-line"><span class="pl-c">** The final mode is Pipe. This is the difficult</span></td>
-      </tr>
-      <tr>
-        <td id="L293" class="blob-num js-line-number" data-line-number="293"></td>
-        <td id="LC293" class="blob-code js-file-line"><span class="pl-c">** one. As we assume pipes cannot be seeked - and </span></td>
-      </tr>
-      <tr>
-        <td id="L294" class="blob-num js-line-number" data-line-number="294"></td>
-        <td id="LC294" class="blob-code js-file-line"><span class="pl-c">** only support a single character lookahead at </span></td>
-      </tr>
-      <tr>
-        <td id="L295" class="blob-num js-line-number" data-line-number="295"></td>
-        <td id="LC295" class="blob-code js-file-line"><span class="pl-c">** any point, when the input is marked for a </span></td>
-      </tr>
-      <tr>
-        <td id="L296" class="blob-num js-line-number" data-line-number="296"></td>
-        <td id="LC296" class="blob-code js-file-line"><span class="pl-c">** potential backtracking we start buffering any </span></td>
-      </tr>
-      <tr>
-        <td id="L297" class="blob-num js-line-number" data-line-number="297"></td>
-        <td id="LC297" class="blob-code js-file-line"><span class="pl-c">** input.</span></td>
-      </tr>
-      <tr>
-        <td id="L298" class="blob-num js-line-number" data-line-number="298"></td>
-        <td id="LC298" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L299" class="blob-num js-line-number" data-line-number="299"></td>
-        <td id="LC299" class="blob-code js-file-line"><span class="pl-c">** This means that if we are requested to seek</span></td>
-      </tr>
-      <tr>
-        <td id="L300" class="blob-num js-line-number" data-line-number="300"></td>
-        <td id="LC300" class="blob-code js-file-line"><span class="pl-c">** back we can simply start reading from the</span></td>
-      </tr>
-      <tr>
-        <td id="L301" class="blob-num js-line-number" data-line-number="301"></td>
-        <td id="LC301" class="blob-code js-file-line"><span class="pl-c">** buffer instead of the input.</span></td>
-      </tr>
-      <tr>
-        <td id="L302" class="blob-num js-line-number" data-line-number="302"></td>
-        <td id="LC302" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L303" class="blob-num js-line-number" data-line-number="303"></td>
-        <td id="LC303" class="blob-code js-file-line"><span class="pl-c">** Of course using `mpc_predictive` will disable</span></td>
-      </tr>
-      <tr>
-        <td id="L304" class="blob-num js-line-number" data-line-number="304"></td>
-        <td id="LC304" class="blob-code js-file-line"><span class="pl-c">** backtracking and make LL(1) grammars easy</span></td>
-      </tr>
-      <tr>
-        <td id="L305" class="blob-num js-line-number" data-line-number="305"></td>
-        <td id="LC305" class="blob-code js-file-line"><span class="pl-c">** to parse for all input methods.</span></td>
-      </tr>
-      <tr>
-        <td id="L306" class="blob-num js-line-number" data-line-number="306"></td>
-        <td id="LC306" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L307" class="blob-num js-line-number" data-line-number="307"></td>
-        <td id="LC307" class="blob-code js-file-line"><span class="pl-c">*/</span></td>
-      </tr>
-      <tr>
-        <td id="L308" class="blob-num js-line-number" data-line-number="308"></td>
-        <td id="LC308" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L309" class="blob-num js-line-number" data-line-number="309"></td>
-        <td id="LC309" class="blob-code js-file-line"><span class="pl-st">enum</span> {</td>
-      </tr>
-      <tr>
-        <td id="L310" class="blob-num js-line-number" data-line-number="310"></td>
-        <td id="LC310" class="blob-code js-file-line">  MPC_INPUT_STRING = <span class="pl-c1">0</span>,</td>
-      </tr>
-      <tr>
-        <td id="L311" class="blob-num js-line-number" data-line-number="311"></td>
-        <td id="LC311" class="blob-code js-file-line">  MPC_INPUT_FILE   = <span class="pl-c1">1</span>,</td>
-      </tr>
-      <tr>
-        <td id="L312" class="blob-num js-line-number" data-line-number="312"></td>
-        <td id="LC312" class="blob-code js-file-line">  MPC_INPUT_PIPE   = <span class="pl-c1">2</span></td>
-      </tr>
-      <tr>
-        <td id="L313" class="blob-num js-line-number" data-line-number="313"></td>
-        <td id="LC313" class="blob-code js-file-line">};</td>
-      </tr>
-      <tr>
-        <td id="L314" class="blob-num js-line-number" data-line-number="314"></td>
-        <td id="LC314" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L315" class="blob-num js-line-number" data-line-number="315"></td>
-        <td id="LC315" class="blob-code js-file-line"><span class="pl-st">typedef</span> <span class="pl-st">struct</span> {</td>
-      </tr>
-      <tr>
-        <td id="L316" class="blob-num js-line-number" data-line-number="316"></td>
-        <td id="LC316" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L317" class="blob-num js-line-number" data-line-number="317"></td>
-        <td id="LC317" class="blob-code js-file-line">  <span class="pl-st">int</span> type;</td>
-      </tr>
-      <tr>
-        <td id="L318" class="blob-num js-line-number" data-line-number="318"></td>
-        <td id="LC318" class="blob-code js-file-line">  <span class="pl-st">char</span> *filename;  </td>
-      </tr>
-      <tr>
-        <td id="L319" class="blob-num js-line-number" data-line-number="319"></td>
-        <td id="LC319" class="blob-code js-file-line">  <span class="pl-s3">mpc_state_t</span> state;</td>
-      </tr>
-      <tr>
-        <td id="L320" class="blob-num js-line-number" data-line-number="320"></td>
-        <td id="LC320" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L321" class="blob-num js-line-number" data-line-number="321"></td>
-        <td id="LC321" class="blob-code js-file-line">  <span class="pl-st">char</span> *string;</td>
-      </tr>
-      <tr>
-        <td id="L322" class="blob-num js-line-number" data-line-number="322"></td>
-        <td id="LC322" class="blob-code js-file-line">  <span class="pl-st">char</span> *buffer;</td>
-      </tr>
-      <tr>
-        <td id="L323" class="blob-num js-line-number" data-line-number="323"></td>
-        <td id="LC323" class="blob-code js-file-line">  <span class="pl-s3">FILE</span> *file;</td>
-      </tr>
-      <tr>
-        <td id="L324" class="blob-num js-line-number" data-line-number="324"></td>
-        <td id="LC324" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L325" class="blob-num js-line-number" data-line-number="325"></td>
-        <td id="LC325" class="blob-code js-file-line">  <span class="pl-st">int</span> backtrack;</td>
-      </tr>
-      <tr>
-        <td id="L326" class="blob-num js-line-number" data-line-number="326"></td>
-        <td id="LC326" class="blob-code js-file-line">  <span class="pl-st">int</span> marks_num;</td>
-      </tr>
-      <tr>
-        <td id="L327" class="blob-num js-line-number" data-line-number="327"></td>
-        <td id="LC327" class="blob-code js-file-line">  <span class="pl-s3">mpc_state_t</span>* marks;</td>
-      </tr>
-      <tr>
-        <td id="L328" class="blob-num js-line-number" data-line-number="328"></td>
-        <td id="LC328" class="blob-code js-file-line">  <span class="pl-st">char</span>* lasts;</td>
-      </tr>
-      <tr>
-        <td id="L329" class="blob-num js-line-number" data-line-number="329"></td>
-        <td id="LC329" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L330" class="blob-num js-line-number" data-line-number="330"></td>
-        <td id="LC330" class="blob-code js-file-line">  <span class="pl-st">char</span> last;</td>
-      </tr>
-      <tr>
-        <td id="L331" class="blob-num js-line-number" data-line-number="331"></td>
-        <td id="LC331" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L332" class="blob-num js-line-number" data-line-number="332"></td>
-        <td id="LC332" class="blob-code js-file-line">} <span class="pl-s3">mpc_input_t</span>;</td>
-      </tr>
-      <tr>
-        <td id="L333" class="blob-num js-line-number" data-line-number="333"></td>
-        <td id="LC333" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L334" class="blob-num js-line-number" data-line-number="334"></td>
-        <td id="LC334" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_input_t</span> *<span class="pl-en">mpc_input_new_string</span>(<span class="pl-s">const</span> <span class="pl-st">char</span> *filename, <span class="pl-s">const</span> <span class="pl-st">char</span> *string) {</td>
-      </tr>
-      <tr>
-        <td id="L335" class="blob-num js-line-number" data-line-number="335"></td>
-        <td id="LC335" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L336" class="blob-num js-line-number" data-line-number="336"></td>
-        <td id="LC336" class="blob-code js-file-line">  <span class="pl-s3">mpc_input_t</span> *i = <span class="pl-s3">malloc</span>(<span class="pl-k">sizeof</span>(<span class="pl-s3">mpc_input_t</span>));</td>
-      </tr>
-      <tr>
-        <td id="L337" class="blob-num js-line-number" data-line-number="337"></td>
-        <td id="LC337" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L338" class="blob-num js-line-number" data-line-number="338"></td>
-        <td id="LC338" class="blob-code js-file-line">  i-&gt;filename = <span class="pl-s3">malloc</span>(<span class="pl-s3">strlen</span>(filename) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L339" class="blob-num js-line-number" data-line-number="339"></td>
-        <td id="LC339" class="blob-code js-file-line">  <span class="pl-s3">strcpy</span>(i-&gt;filename, filename);</td>
-      </tr>
-      <tr>
-        <td id="L340" class="blob-num js-line-number" data-line-number="340"></td>
-        <td id="LC340" class="blob-code js-file-line">  i-&gt;type = MPC_INPUT_STRING;</td>
-      </tr>
-      <tr>
-        <td id="L341" class="blob-num js-line-number" data-line-number="341"></td>
-        <td id="LC341" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L342" class="blob-num js-line-number" data-line-number="342"></td>
-        <td id="LC342" class="blob-code js-file-line">  i-&gt;state = <span class="pl-s3">mpc_state_new</span>();</td>
-      </tr>
-      <tr>
-        <td id="L343" class="blob-num js-line-number" data-line-number="343"></td>
-        <td id="LC343" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L344" class="blob-num js-line-number" data-line-number="344"></td>
-        <td id="LC344" class="blob-code js-file-line">  i-&gt;string = <span class="pl-s3">malloc</span>(<span class="pl-s3">strlen</span>(string) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L345" class="blob-num js-line-number" data-line-number="345"></td>
-        <td id="LC345" class="blob-code js-file-line">  <span class="pl-s3">strcpy</span>(i-&gt;string, string);</td>
-      </tr>
-      <tr>
-        <td id="L346" class="blob-num js-line-number" data-line-number="346"></td>
-        <td id="LC346" class="blob-code js-file-line">  i-&gt;buffer = <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L347" class="blob-num js-line-number" data-line-number="347"></td>
-        <td id="LC347" class="blob-code js-file-line">  i-&gt;file = <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L348" class="blob-num js-line-number" data-line-number="348"></td>
-        <td id="LC348" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L349" class="blob-num js-line-number" data-line-number="349"></td>
-        <td id="LC349" class="blob-code js-file-line">  i-&gt;backtrack = <span class="pl-c1">1</span>;</td>
-      </tr>
-      <tr>
-        <td id="L350" class="blob-num js-line-number" data-line-number="350"></td>
-        <td id="LC350" class="blob-code js-file-line">  i-&gt;marks_num = <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L351" class="blob-num js-line-number" data-line-number="351"></td>
-        <td id="LC351" class="blob-code js-file-line">  i-&gt;marks = <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L352" class="blob-num js-line-number" data-line-number="352"></td>
-        <td id="LC352" class="blob-code js-file-line">  i-&gt;lasts = <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L353" class="blob-num js-line-number" data-line-number="353"></td>
-        <td id="LC353" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L354" class="blob-num js-line-number" data-line-number="354"></td>
-        <td id="LC354" class="blob-code js-file-line">  i-&gt;last = <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-ii">\0</span><span class="pl-pds">&#39;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L355" class="blob-num js-line-number" data-line-number="355"></td>
-        <td id="LC355" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L356" class="blob-num js-line-number" data-line-number="356"></td>
-        <td id="LC356" class="blob-code js-file-line">  <span class="pl-k">return</span> i;</td>
-      </tr>
-      <tr>
-        <td id="L357" class="blob-num js-line-number" data-line-number="357"></td>
-        <td id="LC357" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L358" class="blob-num js-line-number" data-line-number="358"></td>
-        <td id="LC358" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L359" class="blob-num js-line-number" data-line-number="359"></td>
-        <td id="LC359" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_input_t</span> *<span class="pl-en">mpc_input_new_pipe</span>(<span class="pl-s">const</span> <span class="pl-st">char</span> *filename, <span class="pl-s3">FILE</span> *pipe) {</td>
-      </tr>
-      <tr>
-        <td id="L360" class="blob-num js-line-number" data-line-number="360"></td>
-        <td id="LC360" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L361" class="blob-num js-line-number" data-line-number="361"></td>
-        <td id="LC361" class="blob-code js-file-line">  <span class="pl-s3">mpc_input_t</span> *i = <span class="pl-s3">malloc</span>(<span class="pl-k">sizeof</span>(<span class="pl-s3">mpc_input_t</span>));</td>
-      </tr>
-      <tr>
-        <td id="L362" class="blob-num js-line-number" data-line-number="362"></td>
-        <td id="LC362" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L363" class="blob-num js-line-number" data-line-number="363"></td>
-        <td id="LC363" class="blob-code js-file-line">  i-&gt;filename = <span class="pl-s3">malloc</span>(<span class="pl-s3">strlen</span>(filename) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L364" class="blob-num js-line-number" data-line-number="364"></td>
-        <td id="LC364" class="blob-code js-file-line">  <span class="pl-s3">strcpy</span>(i-&gt;filename, filename);</td>
-      </tr>
-      <tr>
-        <td id="L365" class="blob-num js-line-number" data-line-number="365"></td>
-        <td id="LC365" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L366" class="blob-num js-line-number" data-line-number="366"></td>
-        <td id="LC366" class="blob-code js-file-line">  i-&gt;type = MPC_INPUT_PIPE;</td>
-      </tr>
-      <tr>
-        <td id="L367" class="blob-num js-line-number" data-line-number="367"></td>
-        <td id="LC367" class="blob-code js-file-line">  i-&gt;state = <span class="pl-s3">mpc_state_new</span>();</td>
-      </tr>
-      <tr>
-        <td id="L368" class="blob-num js-line-number" data-line-number="368"></td>
-        <td id="LC368" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L369" class="blob-num js-line-number" data-line-number="369"></td>
-        <td id="LC369" class="blob-code js-file-line">  i-&gt;string = <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L370" class="blob-num js-line-number" data-line-number="370"></td>
-        <td id="LC370" class="blob-code js-file-line">  i-&gt;buffer = <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L371" class="blob-num js-line-number" data-line-number="371"></td>
-        <td id="LC371" class="blob-code js-file-line">  i-&gt;file = <span class="pl-s3">pipe</span>;</td>
-      </tr>
-      <tr>
-        <td id="L372" class="blob-num js-line-number" data-line-number="372"></td>
-        <td id="LC372" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L373" class="blob-num js-line-number" data-line-number="373"></td>
-        <td id="LC373" class="blob-code js-file-line">  i-&gt;backtrack = <span class="pl-c1">1</span>;</td>
-      </tr>
-      <tr>
-        <td id="L374" class="blob-num js-line-number" data-line-number="374"></td>
-        <td id="LC374" class="blob-code js-file-line">  i-&gt;marks_num = <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L375" class="blob-num js-line-number" data-line-number="375"></td>
-        <td id="LC375" class="blob-code js-file-line">  i-&gt;marks = <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L376" class="blob-num js-line-number" data-line-number="376"></td>
-        <td id="LC376" class="blob-code js-file-line">  i-&gt;lasts = <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L377" class="blob-num js-line-number" data-line-number="377"></td>
-        <td id="LC377" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L378" class="blob-num js-line-number" data-line-number="378"></td>
-        <td id="LC378" class="blob-code js-file-line">  i-&gt;last = <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-ii">\0</span><span class="pl-pds">&#39;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L379" class="blob-num js-line-number" data-line-number="379"></td>
-        <td id="LC379" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L380" class="blob-num js-line-number" data-line-number="380"></td>
-        <td id="LC380" class="blob-code js-file-line">  <span class="pl-k">return</span> i;</td>
-      </tr>
-      <tr>
-        <td id="L381" class="blob-num js-line-number" data-line-number="381"></td>
-        <td id="LC381" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L382" class="blob-num js-line-number" data-line-number="382"></td>
-        <td id="LC382" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L383" class="blob-num js-line-number" data-line-number="383"></td>
-        <td id="LC383" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L384" class="blob-num js-line-number" data-line-number="384"></td>
-        <td id="LC384" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_input_t</span> *<span class="pl-en">mpc_input_new_file</span>(<span class="pl-s">const</span> <span class="pl-st">char</span> *filename, <span class="pl-s3">FILE</span> *file) {</td>
-      </tr>
-      <tr>
-        <td id="L385" class="blob-num js-line-number" data-line-number="385"></td>
-        <td id="LC385" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L386" class="blob-num js-line-number" data-line-number="386"></td>
-        <td id="LC386" class="blob-code js-file-line">  <span class="pl-s3">mpc_input_t</span> *i = <span class="pl-s3">malloc</span>(<span class="pl-k">sizeof</span>(<span class="pl-s3">mpc_input_t</span>));</td>
-      </tr>
-      <tr>
-        <td id="L387" class="blob-num js-line-number" data-line-number="387"></td>
-        <td id="LC387" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L388" class="blob-num js-line-number" data-line-number="388"></td>
-        <td id="LC388" class="blob-code js-file-line">  i-&gt;filename = <span class="pl-s3">malloc</span>(<span class="pl-s3">strlen</span>(filename) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L389" class="blob-num js-line-number" data-line-number="389"></td>
-        <td id="LC389" class="blob-code js-file-line">  <span class="pl-s3">strcpy</span>(i-&gt;filename, filename);</td>
-      </tr>
-      <tr>
-        <td id="L390" class="blob-num js-line-number" data-line-number="390"></td>
-        <td id="LC390" class="blob-code js-file-line">  i-&gt;type = MPC_INPUT_FILE;</td>
-      </tr>
-      <tr>
-        <td id="L391" class="blob-num js-line-number" data-line-number="391"></td>
-        <td id="LC391" class="blob-code js-file-line">  i-&gt;state = <span class="pl-s3">mpc_state_new</span>();</td>
-      </tr>
-      <tr>
-        <td id="L392" class="blob-num js-line-number" data-line-number="392"></td>
-        <td id="LC392" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L393" class="blob-num js-line-number" data-line-number="393"></td>
-        <td id="LC393" class="blob-code js-file-line">  i-&gt;string = <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L394" class="blob-num js-line-number" data-line-number="394"></td>
-        <td id="LC394" class="blob-code js-file-line">  i-&gt;buffer = <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L395" class="blob-num js-line-number" data-line-number="395"></td>
-        <td id="LC395" class="blob-code js-file-line">  i-&gt;file = file;</td>
-      </tr>
-      <tr>
-        <td id="L396" class="blob-num js-line-number" data-line-number="396"></td>
-        <td id="LC396" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L397" class="blob-num js-line-number" data-line-number="397"></td>
-        <td id="LC397" class="blob-code js-file-line">  i-&gt;backtrack = <span class="pl-c1">1</span>;</td>
-      </tr>
-      <tr>
-        <td id="L398" class="blob-num js-line-number" data-line-number="398"></td>
-        <td id="LC398" class="blob-code js-file-line">  i-&gt;marks_num = <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L399" class="blob-num js-line-number" data-line-number="399"></td>
-        <td id="LC399" class="blob-code js-file-line">  i-&gt;marks = <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L400" class="blob-num js-line-number" data-line-number="400"></td>
-        <td id="LC400" class="blob-code js-file-line">  i-&gt;lasts = <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L401" class="blob-num js-line-number" data-line-number="401"></td>
-        <td id="LC401" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L402" class="blob-num js-line-number" data-line-number="402"></td>
-        <td id="LC402" class="blob-code js-file-line">  i-&gt;last = <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-ii">\0</span><span class="pl-pds">&#39;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L403" class="blob-num js-line-number" data-line-number="403"></td>
-        <td id="LC403" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L404" class="blob-num js-line-number" data-line-number="404"></td>
-        <td id="LC404" class="blob-code js-file-line">  <span class="pl-k">return</span> i;</td>
-      </tr>
-      <tr>
-        <td id="L405" class="blob-num js-line-number" data-line-number="405"></td>
-        <td id="LC405" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L406" class="blob-num js-line-number" data-line-number="406"></td>
-        <td id="LC406" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L407" class="blob-num js-line-number" data-line-number="407"></td>
-        <td id="LC407" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">void</span> <span class="pl-en">mpc_input_delete</span>(<span class="pl-s3">mpc_input_t</span> *i) {</td>
-      </tr>
-      <tr>
-        <td id="L408" class="blob-num js-line-number" data-line-number="408"></td>
-        <td id="LC408" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L409" class="blob-num js-line-number" data-line-number="409"></td>
-        <td id="LC409" class="blob-code js-file-line">  <span class="pl-s3">free</span>(i-&gt;filename);</td>
-      </tr>
-      <tr>
-        <td id="L410" class="blob-num js-line-number" data-line-number="410"></td>
-        <td id="LC410" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L411" class="blob-num js-line-number" data-line-number="411"></td>
-        <td id="LC411" class="blob-code js-file-line">  <span class="pl-k">if</span> (i-&gt;type == MPC_INPUT_STRING) { <span class="pl-s3">free</span>(i-&gt;string); }</td>
-      </tr>
-      <tr>
-        <td id="L412" class="blob-num js-line-number" data-line-number="412"></td>
-        <td id="LC412" class="blob-code js-file-line">  <span class="pl-k">if</span> (i-&gt;type == MPC_INPUT_PIPE) { <span class="pl-s3">free</span>(i-&gt;buffer); }</td>
-      </tr>
-      <tr>
-        <td id="L413" class="blob-num js-line-number" data-line-number="413"></td>
-        <td id="LC413" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L414" class="blob-num js-line-number" data-line-number="414"></td>
-        <td id="LC414" class="blob-code js-file-line">  <span class="pl-s3">free</span>(i-&gt;marks);</td>
-      </tr>
-      <tr>
-        <td id="L415" class="blob-num js-line-number" data-line-number="415"></td>
-        <td id="LC415" class="blob-code js-file-line">  <span class="pl-s3">free</span>(i-&gt;lasts);</td>
-      </tr>
-      <tr>
-        <td id="L416" class="blob-num js-line-number" data-line-number="416"></td>
-        <td id="LC416" class="blob-code js-file-line">  <span class="pl-s3">free</span>(i);</td>
-      </tr>
-      <tr>
-        <td id="L417" class="blob-num js-line-number" data-line-number="417"></td>
-        <td id="LC417" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L418" class="blob-num js-line-number" data-line-number="418"></td>
-        <td id="LC418" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L419" class="blob-num js-line-number" data-line-number="419"></td>
-        <td id="LC419" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">void</span> <span class="pl-en">mpc_input_backtrack_disable</span>(<span class="pl-s3">mpc_input_t</span> *i) { i-&gt;backtrack--; }</td>
-      </tr>
-      <tr>
-        <td id="L420" class="blob-num js-line-number" data-line-number="420"></td>
-        <td id="LC420" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">void</span> <span class="pl-en">mpc_input_backtrack_enable</span>(<span class="pl-s3">mpc_input_t</span> *i) { i-&gt;backtrack++; }</td>
-      </tr>
-      <tr>
-        <td id="L421" class="blob-num js-line-number" data-line-number="421"></td>
-        <td id="LC421" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L422" class="blob-num js-line-number" data-line-number="422"></td>
-        <td id="LC422" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">void</span> <span class="pl-en">mpc_input_mark</span>(<span class="pl-s3">mpc_input_t</span> *i) {</td>
-      </tr>
-      <tr>
-        <td id="L423" class="blob-num js-line-number" data-line-number="423"></td>
-        <td id="LC423" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L424" class="blob-num js-line-number" data-line-number="424"></td>
-        <td id="LC424" class="blob-code js-file-line">  <span class="pl-k">if</span> (i-&gt;backtrack &lt; <span class="pl-c1">1</span>) { <span class="pl-k">return</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L425" class="blob-num js-line-number" data-line-number="425"></td>
-        <td id="LC425" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L426" class="blob-num js-line-number" data-line-number="426"></td>
-        <td id="LC426" class="blob-code js-file-line">  i-&gt;marks_num++;</td>
-      </tr>
-      <tr>
-        <td id="L427" class="blob-num js-line-number" data-line-number="427"></td>
-        <td id="LC427" class="blob-code js-file-line">  i-&gt;marks = <span class="pl-s3">realloc</span>(i-&gt;marks, <span class="pl-k">sizeof</span>(<span class="pl-s3">mpc_state_t</span>) * i-&gt;marks_num);</td>
-      </tr>
-      <tr>
-        <td id="L428" class="blob-num js-line-number" data-line-number="428"></td>
-        <td id="LC428" class="blob-code js-file-line">  i-&gt;lasts = <span class="pl-s3">realloc</span>(i-&gt;lasts, <span class="pl-k">sizeof</span>(<span class="pl-st">char</span>) * i-&gt;marks_num);</td>
-      </tr>
-      <tr>
-        <td id="L429" class="blob-num js-line-number" data-line-number="429"></td>
-        <td id="LC429" class="blob-code js-file-line">  i-&gt;marks[i-&gt;marks_num-<span class="pl-c1">1</span>] = i-&gt;state;</td>
-      </tr>
-      <tr>
-        <td id="L430" class="blob-num js-line-number" data-line-number="430"></td>
-        <td id="LC430" class="blob-code js-file-line">  i-&gt;lasts[i-&gt;marks_num-<span class="pl-c1">1</span>] = i-&gt;last;</td>
-      </tr>
-      <tr>
-        <td id="L431" class="blob-num js-line-number" data-line-number="431"></td>
-        <td id="LC431" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L432" class="blob-num js-line-number" data-line-number="432"></td>
-        <td id="LC432" class="blob-code js-file-line">  <span class="pl-k">if</span> (i-&gt;type == MPC_INPUT_PIPE &amp;&amp; i-&gt;marks_num == <span class="pl-c1">1</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L433" class="blob-num js-line-number" data-line-number="433"></td>
-        <td id="LC433" class="blob-code js-file-line">    i-&gt;buffer = <span class="pl-s3">calloc</span>(<span class="pl-c1">1</span>, <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L434" class="blob-num js-line-number" data-line-number="434"></td>
-        <td id="LC434" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L435" class="blob-num js-line-number" data-line-number="435"></td>
-        <td id="LC435" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L436" class="blob-num js-line-number" data-line-number="436"></td>
-        <td id="LC436" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L437" class="blob-num js-line-number" data-line-number="437"></td>
-        <td id="LC437" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L438" class="blob-num js-line-number" data-line-number="438"></td>
-        <td id="LC438" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">void</span> <span class="pl-en">mpc_input_unmark</span>(<span class="pl-s3">mpc_input_t</span> *i) {</td>
-      </tr>
-      <tr>
-        <td id="L439" class="blob-num js-line-number" data-line-number="439"></td>
-        <td id="LC439" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L440" class="blob-num js-line-number" data-line-number="440"></td>
-        <td id="LC440" class="blob-code js-file-line">  <span class="pl-k">if</span> (i-&gt;backtrack &lt; <span class="pl-c1">1</span>) { <span class="pl-k">return</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L441" class="blob-num js-line-number" data-line-number="441"></td>
-        <td id="LC441" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L442" class="blob-num js-line-number" data-line-number="442"></td>
-        <td id="LC442" class="blob-code js-file-line">  i-&gt;marks_num--;</td>
-      </tr>
-      <tr>
-        <td id="L443" class="blob-num js-line-number" data-line-number="443"></td>
-        <td id="LC443" class="blob-code js-file-line">  i-&gt;marks = <span class="pl-s3">realloc</span>(i-&gt;marks, <span class="pl-k">sizeof</span>(<span class="pl-s3">mpc_state_t</span>) * i-&gt;marks_num);</td>
-      </tr>
-      <tr>
-        <td id="L444" class="blob-num js-line-number" data-line-number="444"></td>
-        <td id="LC444" class="blob-code js-file-line">  i-&gt;lasts = <span class="pl-s3">realloc</span>(i-&gt;lasts, <span class="pl-k">sizeof</span>(<span class="pl-st">char</span>) * i-&gt;marks_num);</td>
-      </tr>
-      <tr>
-        <td id="L445" class="blob-num js-line-number" data-line-number="445"></td>
-        <td id="LC445" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L446" class="blob-num js-line-number" data-line-number="446"></td>
-        <td id="LC446" class="blob-code js-file-line">  <span class="pl-k">if</span> (i-&gt;type == MPC_INPUT_PIPE &amp;&amp; i-&gt;marks_num == <span class="pl-c1">0</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L447" class="blob-num js-line-number" data-line-number="447"></td>
-        <td id="LC447" class="blob-code js-file-line">    <span class="pl-s3">free</span>(i-&gt;buffer);</td>
-      </tr>
-      <tr>
-        <td id="L448" class="blob-num js-line-number" data-line-number="448"></td>
-        <td id="LC448" class="blob-code js-file-line">    i-&gt;buffer = <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L449" class="blob-num js-line-number" data-line-number="449"></td>
-        <td id="LC449" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L450" class="blob-num js-line-number" data-line-number="450"></td>
-        <td id="LC450" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L451" class="blob-num js-line-number" data-line-number="451"></td>
-        <td id="LC451" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L452" class="blob-num js-line-number" data-line-number="452"></td>
-        <td id="LC452" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L453" class="blob-num js-line-number" data-line-number="453"></td>
-        <td id="LC453" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">void</span> <span class="pl-en">mpc_input_rewind</span>(<span class="pl-s3">mpc_input_t</span> *i) {</td>
-      </tr>
-      <tr>
-        <td id="L454" class="blob-num js-line-number" data-line-number="454"></td>
-        <td id="LC454" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L455" class="blob-num js-line-number" data-line-number="455"></td>
-        <td id="LC455" class="blob-code js-file-line">  <span class="pl-k">if</span> (i-&gt;backtrack &lt; <span class="pl-c1">1</span>) { <span class="pl-k">return</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L456" class="blob-num js-line-number" data-line-number="456"></td>
-        <td id="LC456" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L457" class="blob-num js-line-number" data-line-number="457"></td>
-        <td id="LC457" class="blob-code js-file-line">  i-&gt;state = i-&gt;marks[i-&gt;marks_num-<span class="pl-c1">1</span>];</td>
-      </tr>
-      <tr>
-        <td id="L458" class="blob-num js-line-number" data-line-number="458"></td>
-        <td id="LC458" class="blob-code js-file-line">  i-&gt;last  = i-&gt;lasts[i-&gt;marks_num-<span class="pl-c1">1</span>];</td>
-      </tr>
-      <tr>
-        <td id="L459" class="blob-num js-line-number" data-line-number="459"></td>
-        <td id="LC459" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L460" class="blob-num js-line-number" data-line-number="460"></td>
-        <td id="LC460" class="blob-code js-file-line">  <span class="pl-k">if</span> (i-&gt;type == MPC_INPUT_FILE) {</td>
-      </tr>
-      <tr>
-        <td id="L461" class="blob-num js-line-number" data-line-number="461"></td>
-        <td id="LC461" class="blob-code js-file-line">    <span class="pl-s3">fseek</span>(i-&gt;file, i-&gt;state.<span class="pl-vo">pos</span>, SEEK_SET);</td>
-      </tr>
-      <tr>
-        <td id="L462" class="blob-num js-line-number" data-line-number="462"></td>
-        <td id="LC462" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L463" class="blob-num js-line-number" data-line-number="463"></td>
-        <td id="LC463" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L464" class="blob-num js-line-number" data-line-number="464"></td>
-        <td id="LC464" class="blob-code js-file-line">  <span class="pl-s3">mpc_input_unmark</span>(i);</td>
-      </tr>
-      <tr>
-        <td id="L465" class="blob-num js-line-number" data-line-number="465"></td>
-        <td id="LC465" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L466" class="blob-num js-line-number" data-line-number="466"></td>
-        <td id="LC466" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L467" class="blob-num js-line-number" data-line-number="467"></td>
-        <td id="LC467" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">int</span> <span class="pl-en">mpc_input_buffer_in_range</span>(<span class="pl-s3">mpc_input_t</span> *i) {</td>
-      </tr>
-      <tr>
-        <td id="L468" class="blob-num js-line-number" data-line-number="468"></td>
-        <td id="LC468" class="blob-code js-file-line">  <span class="pl-k">return</span> i-&gt;state.<span class="pl-vo">pos</span> &lt; (<span class="pl-st">long</span>)(<span class="pl-s3">strlen</span>(i-&gt;buffer) + i-&gt;marks[<span class="pl-c1">0</span>].<span class="pl-vo">pos</span>);</td>
-      </tr>
-      <tr>
-        <td id="L469" class="blob-num js-line-number" data-line-number="469"></td>
-        <td id="LC469" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L470" class="blob-num js-line-number" data-line-number="470"></td>
-        <td id="LC470" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L471" class="blob-num js-line-number" data-line-number="471"></td>
-        <td id="LC471" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">char</span> <span class="pl-en">mpc_input_buffer_get</span>(<span class="pl-s3">mpc_input_t</span> *i) {</td>
-      </tr>
-      <tr>
-        <td id="L472" class="blob-num js-line-number" data-line-number="472"></td>
-        <td id="LC472" class="blob-code js-file-line">  <span class="pl-k">return</span> i-&gt;buffer[i-&gt;state.<span class="pl-vo">pos</span> - i-&gt;marks[<span class="pl-c1">0</span>].<span class="pl-vo">pos</span>];</td>
-      </tr>
-      <tr>
-        <td id="L473" class="blob-num js-line-number" data-line-number="473"></td>
-        <td id="LC473" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L474" class="blob-num js-line-number" data-line-number="474"></td>
-        <td id="LC474" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L475" class="blob-num js-line-number" data-line-number="475"></td>
-        <td id="LC475" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">int</span> <span class="pl-en">mpc_input_terminated</span>(<span class="pl-s3">mpc_input_t</span> *i) {</td>
-      </tr>
-      <tr>
-        <td id="L476" class="blob-num js-line-number" data-line-number="476"></td>
-        <td id="LC476" class="blob-code js-file-line">  <span class="pl-k">if</span> (i-&gt;type == MPC_INPUT_STRING &amp;&amp; i-&gt;state.<span class="pl-vo">pos</span> == (<span class="pl-st">long</span>)<span class="pl-s3">strlen</span>(i-&gt;string)) { <span class="pl-k">return</span> <span class="pl-c1">1</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L477" class="blob-num js-line-number" data-line-number="477"></td>
-        <td id="LC477" class="blob-code js-file-line">  <span class="pl-k">if</span> (i-&gt;type == MPC_INPUT_FILE &amp;&amp; <span class="pl-s3">feof</span>(i-&gt;file)) { <span class="pl-k">return</span> <span class="pl-c1">1</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L478" class="blob-num js-line-number" data-line-number="478"></td>
-        <td id="LC478" class="blob-code js-file-line">  <span class="pl-k">if</span> (i-&gt;type == MPC_INPUT_PIPE &amp;&amp; <span class="pl-s3">feof</span>(i-&gt;file)) { <span class="pl-k">return</span> <span class="pl-c1">1</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L479" class="blob-num js-line-number" data-line-number="479"></td>
-        <td id="LC479" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L480" class="blob-num js-line-number" data-line-number="480"></td>
-        <td id="LC480" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L481" class="blob-num js-line-number" data-line-number="481"></td>
-        <td id="LC481" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L482" class="blob-num js-line-number" data-line-number="482"></td>
-        <td id="LC482" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">char</span> <span class="pl-en">mpc_input_getc</span>(<span class="pl-s3">mpc_input_t</span> *i) {</td>
-      </tr>
-      <tr>
-        <td id="L483" class="blob-num js-line-number" data-line-number="483"></td>
-        <td id="LC483" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L484" class="blob-num js-line-number" data-line-number="484"></td>
-        <td id="LC484" class="blob-code js-file-line">  <span class="pl-st">char</span> c = <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-ii">\0</span><span class="pl-pds">&#39;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L485" class="blob-num js-line-number" data-line-number="485"></td>
-        <td id="LC485" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L486" class="blob-num js-line-number" data-line-number="486"></td>
-        <td id="LC486" class="blob-code js-file-line">  <span class="pl-k">switch</span> (i-&gt;type) {</td>
-      </tr>
-      <tr>
-        <td id="L487" class="blob-num js-line-number" data-line-number="487"></td>
-        <td id="LC487" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L488" class="blob-num js-line-number" data-line-number="488"></td>
-        <td id="LC488" class="blob-code js-file-line">    <span class="pl-k">case</span> MPC_INPUT_STRING: <span class="pl-k">return</span> i-&gt;string[i-&gt;state.<span class="pl-vo">pos</span>];</td>
-      </tr>
-      <tr>
-        <td id="L489" class="blob-num js-line-number" data-line-number="489"></td>
-        <td id="LC489" class="blob-code js-file-line">    <span class="pl-k">case</span> MPC_INPUT_FILE: c = <span class="pl-s3">fgetc</span>(i-&gt;file); <span class="pl-k">return</span> c;</td>
-      </tr>
-      <tr>
-        <td id="L490" class="blob-num js-line-number" data-line-number="490"></td>
-        <td id="LC490" class="blob-code js-file-line">    <span class="pl-k">case</span> MPC_INPUT_PIPE:</td>
-      </tr>
-      <tr>
-        <td id="L491" class="blob-num js-line-number" data-line-number="491"></td>
-        <td id="LC491" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L492" class="blob-num js-line-number" data-line-number="492"></td>
-        <td id="LC492" class="blob-code js-file-line">      <span class="pl-k">if</span> (!i-&gt;buffer) { c = <span class="pl-s3">getc</span>(i-&gt;file); <span class="pl-k">return</span> c; }</td>
-      </tr>
-      <tr>
-        <td id="L493" class="blob-num js-line-number" data-line-number="493"></td>
-        <td id="LC493" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L494" class="blob-num js-line-number" data-line-number="494"></td>
-        <td id="LC494" class="blob-code js-file-line">      <span class="pl-k">if</span> (i-&gt;buffer &amp;&amp; <span class="pl-s3">mpc_input_buffer_in_range</span>(i)) {</td>
-      </tr>
-      <tr>
-        <td id="L495" class="blob-num js-line-number" data-line-number="495"></td>
-        <td id="LC495" class="blob-code js-file-line">        c = <span class="pl-s3">mpc_input_buffer_get</span>(i);</td>
-      </tr>
-      <tr>
-        <td id="L496" class="blob-num js-line-number" data-line-number="496"></td>
-        <td id="LC496" class="blob-code js-file-line">        <span class="pl-k">return</span> c;</td>
-      </tr>
-      <tr>
-        <td id="L497" class="blob-num js-line-number" data-line-number="497"></td>
-        <td id="LC497" class="blob-code js-file-line">      } <span class="pl-k">else</span> {</td>
-      </tr>
-      <tr>
-        <td id="L498" class="blob-num js-line-number" data-line-number="498"></td>
-        <td id="LC498" class="blob-code js-file-line">        c = <span class="pl-s3">getc</span>(i-&gt;file);</td>
-      </tr>
-      <tr>
-        <td id="L499" class="blob-num js-line-number" data-line-number="499"></td>
-        <td id="LC499" class="blob-code js-file-line">        <span class="pl-k">return</span> c;</td>
-      </tr>
-      <tr>
-        <td id="L500" class="blob-num js-line-number" data-line-number="500"></td>
-        <td id="LC500" class="blob-code js-file-line">      }</td>
-      </tr>
-      <tr>
-        <td id="L501" class="blob-num js-line-number" data-line-number="501"></td>
-        <td id="LC501" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L502" class="blob-num js-line-number" data-line-number="502"></td>
-        <td id="LC502" class="blob-code js-file-line">    <span class="pl-k">default</span>: <span class="pl-k">return</span> c;</td>
-      </tr>
-      <tr>
-        <td id="L503" class="blob-num js-line-number" data-line-number="503"></td>
-        <td id="LC503" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L504" class="blob-num js-line-number" data-line-number="504"></td>
-        <td id="LC504" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L505" class="blob-num js-line-number" data-line-number="505"></td>
-        <td id="LC505" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L506" class="blob-num js-line-number" data-line-number="506"></td>
-        <td id="LC506" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">char</span> <span class="pl-en">mpc_input_peekc</span>(<span class="pl-s3">mpc_input_t</span> *i) {</td>
-      </tr>
-      <tr>
-        <td id="L507" class="blob-num js-line-number" data-line-number="507"></td>
-        <td id="LC507" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L508" class="blob-num js-line-number" data-line-number="508"></td>
-        <td id="LC508" class="blob-code js-file-line">  <span class="pl-st">char</span> c = <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-ii">\0</span><span class="pl-pds">&#39;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L509" class="blob-num js-line-number" data-line-number="509"></td>
-        <td id="LC509" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L510" class="blob-num js-line-number" data-line-number="510"></td>
-        <td id="LC510" class="blob-code js-file-line">  <span class="pl-k">switch</span> (i-&gt;type) {</td>
-      </tr>
-      <tr>
-        <td id="L511" class="blob-num js-line-number" data-line-number="511"></td>
-        <td id="LC511" class="blob-code js-file-line">    <span class="pl-k">case</span> MPC_INPUT_STRING: <span class="pl-k">return</span> i-&gt;string[i-&gt;state.<span class="pl-vo">pos</span>];</td>
-      </tr>
-      <tr>
-        <td id="L512" class="blob-num js-line-number" data-line-number="512"></td>
-        <td id="LC512" class="blob-code js-file-line">    <span class="pl-k">case</span> MPC_INPUT_FILE: </td>
-      </tr>
-      <tr>
-        <td id="L513" class="blob-num js-line-number" data-line-number="513"></td>
-        <td id="LC513" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L514" class="blob-num js-line-number" data-line-number="514"></td>
-        <td id="LC514" class="blob-code js-file-line">      c = <span class="pl-s3">fgetc</span>(i-&gt;file);</td>
-      </tr>
-      <tr>
-        <td id="L515" class="blob-num js-line-number" data-line-number="515"></td>
-        <td id="LC515" class="blob-code js-file-line">      <span class="pl-k">if</span> (<span class="pl-s3">feof</span>(i-&gt;file)) { <span class="pl-k">return</span> <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-ii">\0</span><span class="pl-pds">&#39;</span></span>; }</td>
-      </tr>
-      <tr>
-        <td id="L516" class="blob-num js-line-number" data-line-number="516"></td>
-        <td id="LC516" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L517" class="blob-num js-line-number" data-line-number="517"></td>
-        <td id="LC517" class="blob-code js-file-line">      <span class="pl-s3">fseek</span>(i-&gt;file, -<span class="pl-c1">1</span>, SEEK_CUR);</td>
-      </tr>
-      <tr>
-        <td id="L518" class="blob-num js-line-number" data-line-number="518"></td>
-        <td id="LC518" class="blob-code js-file-line">      <span class="pl-k">return</span> c;</td>
-      </tr>
-      <tr>
-        <td id="L519" class="blob-num js-line-number" data-line-number="519"></td>
-        <td id="LC519" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L520" class="blob-num js-line-number" data-line-number="520"></td>
-        <td id="LC520" class="blob-code js-file-line">    <span class="pl-k">case</span> MPC_INPUT_PIPE:</td>
-      </tr>
-      <tr>
-        <td id="L521" class="blob-num js-line-number" data-line-number="521"></td>
-        <td id="LC521" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L522" class="blob-num js-line-number" data-line-number="522"></td>
-        <td id="LC522" class="blob-code js-file-line">      <span class="pl-k">if</span> (!i-&gt;buffer) {</td>
-      </tr>
-      <tr>
-        <td id="L523" class="blob-num js-line-number" data-line-number="523"></td>
-        <td id="LC523" class="blob-code js-file-line">        c = <span class="pl-s3">getc</span>(i-&gt;file);</td>
-      </tr>
-      <tr>
-        <td id="L524" class="blob-num js-line-number" data-line-number="524"></td>
-        <td id="LC524" class="blob-code js-file-line">        <span class="pl-k">if</span> (<span class="pl-s3">feof</span>(i-&gt;file)) { <span class="pl-k">return</span> <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-ii">\0</span><span class="pl-pds">&#39;</span></span>; }</td>
-      </tr>
-      <tr>
-        <td id="L525" class="blob-num js-line-number" data-line-number="525"></td>
-        <td id="LC525" class="blob-code js-file-line">        <span class="pl-s3">ungetc</span>(c, i-&gt;file);</td>
-      </tr>
-      <tr>
-        <td id="L526" class="blob-num js-line-number" data-line-number="526"></td>
-        <td id="LC526" class="blob-code js-file-line">        <span class="pl-k">return</span> c;</td>
-      </tr>
-      <tr>
-        <td id="L527" class="blob-num js-line-number" data-line-number="527"></td>
-        <td id="LC527" class="blob-code js-file-line">      }</td>
-      </tr>
-      <tr>
-        <td id="L528" class="blob-num js-line-number" data-line-number="528"></td>
-        <td id="LC528" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L529" class="blob-num js-line-number" data-line-number="529"></td>
-        <td id="LC529" class="blob-code js-file-line">      <span class="pl-k">if</span> (i-&gt;buffer &amp;&amp; <span class="pl-s3">mpc_input_buffer_in_range</span>(i)) {</td>
-      </tr>
-      <tr>
-        <td id="L530" class="blob-num js-line-number" data-line-number="530"></td>
-        <td id="LC530" class="blob-code js-file-line">        <span class="pl-k">return</span> <span class="pl-s3">mpc_input_buffer_get</span>(i);</td>
-      </tr>
-      <tr>
-        <td id="L531" class="blob-num js-line-number" data-line-number="531"></td>
-        <td id="LC531" class="blob-code js-file-line">      } <span class="pl-k">else</span> {</td>
-      </tr>
-      <tr>
-        <td id="L532" class="blob-num js-line-number" data-line-number="532"></td>
-        <td id="LC532" class="blob-code js-file-line">        c = <span class="pl-s3">getc</span>(i-&gt;file);</td>
-      </tr>
-      <tr>
-        <td id="L533" class="blob-num js-line-number" data-line-number="533"></td>
-        <td id="LC533" class="blob-code js-file-line">        <span class="pl-k">if</span> (<span class="pl-s3">feof</span>(i-&gt;file)) { <span class="pl-k">return</span> <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-ii">\0</span><span class="pl-pds">&#39;</span></span>; }</td>
-      </tr>
-      <tr>
-        <td id="L534" class="blob-num js-line-number" data-line-number="534"></td>
-        <td id="LC534" class="blob-code js-file-line">        <span class="pl-s3">ungetc</span>(c, i-&gt;file);</td>
-      </tr>
-      <tr>
-        <td id="L535" class="blob-num js-line-number" data-line-number="535"></td>
-        <td id="LC535" class="blob-code js-file-line">        <span class="pl-k">return</span> c;</td>
-      </tr>
-      <tr>
-        <td id="L536" class="blob-num js-line-number" data-line-number="536"></td>
-        <td id="LC536" class="blob-code js-file-line">      }</td>
-      </tr>
-      <tr>
-        <td id="L537" class="blob-num js-line-number" data-line-number="537"></td>
-        <td id="LC537" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L538" class="blob-num js-line-number" data-line-number="538"></td>
-        <td id="LC538" class="blob-code js-file-line">    <span class="pl-k">default</span>: <span class="pl-k">return</span> c;</td>
-      </tr>
-      <tr>
-        <td id="L539" class="blob-num js-line-number" data-line-number="539"></td>
-        <td id="LC539" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L540" class="blob-num js-line-number" data-line-number="540"></td>
-        <td id="LC540" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L541" class="blob-num js-line-number" data-line-number="541"></td>
-        <td id="LC541" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L542" class="blob-num js-line-number" data-line-number="542"></td>
-        <td id="LC542" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L543" class="blob-num js-line-number" data-line-number="543"></td>
-        <td id="LC543" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">int</span> <span class="pl-en">mpc_input_failure</span>(<span class="pl-s3">mpc_input_t</span> *i, <span class="pl-st">char</span> c) {</td>
-      </tr>
-      <tr>
-        <td id="L544" class="blob-num js-line-number" data-line-number="544"></td>
-        <td id="LC544" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L545" class="blob-num js-line-number" data-line-number="545"></td>
-        <td id="LC545" class="blob-code js-file-line">  <span class="pl-k">switch</span> (i-&gt;type) {</td>
-      </tr>
-      <tr>
-        <td id="L546" class="blob-num js-line-number" data-line-number="546"></td>
-        <td id="LC546" class="blob-code js-file-line">    <span class="pl-k">case</span> MPC_INPUT_STRING: { <span class="pl-k">break</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L547" class="blob-num js-line-number" data-line-number="547"></td>
-        <td id="LC547" class="blob-code js-file-line">    <span class="pl-k">case</span> MPC_INPUT_FILE: <span class="pl-s3">fseek</span>(i-&gt;file, -<span class="pl-c1">1</span>, SEEK_CUR); { <span class="pl-k">break</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L548" class="blob-num js-line-number" data-line-number="548"></td>
-        <td id="LC548" class="blob-code js-file-line">    <span class="pl-k">case</span> MPC_INPUT_PIPE: {</td>
-      </tr>
-      <tr>
-        <td id="L549" class="blob-num js-line-number" data-line-number="549"></td>
-        <td id="LC549" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L550" class="blob-num js-line-number" data-line-number="550"></td>
-        <td id="LC550" class="blob-code js-file-line">      <span class="pl-k">if</span> (!i-&gt;buffer) { <span class="pl-s3">ungetc</span>(c, i-&gt;file); <span class="pl-k">break</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L551" class="blob-num js-line-number" data-line-number="551"></td>
-        <td id="LC551" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L552" class="blob-num js-line-number" data-line-number="552"></td>
-        <td id="LC552" class="blob-code js-file-line">      <span class="pl-k">if</span> (i-&gt;buffer &amp;&amp; <span class="pl-s3">mpc_input_buffer_in_range</span>(i)) {</td>
-      </tr>
-      <tr>
-        <td id="L553" class="blob-num js-line-number" data-line-number="553"></td>
-        <td id="LC553" class="blob-code js-file-line">        <span class="pl-k">break</span>;</td>
-      </tr>
-      <tr>
-        <td id="L554" class="blob-num js-line-number" data-line-number="554"></td>
-        <td id="LC554" class="blob-code js-file-line">      } <span class="pl-k">else</span> {</td>
-      </tr>
-      <tr>
-        <td id="L555" class="blob-num js-line-number" data-line-number="555"></td>
-        <td id="LC555" class="blob-code js-file-line">        <span class="pl-s3">ungetc</span>(c, i-&gt;file); </td>
-      </tr>
-      <tr>
-        <td id="L556" class="blob-num js-line-number" data-line-number="556"></td>
-        <td id="LC556" class="blob-code js-file-line">      }</td>
-      </tr>
-      <tr>
-        <td id="L557" class="blob-num js-line-number" data-line-number="557"></td>
-        <td id="LC557" class="blob-code js-file-line">    }</td>
-      </tr>
-      <tr>
-        <td id="L558" class="blob-num js-line-number" data-line-number="558"></td>
-        <td id="LC558" class="blob-code js-file-line">    <span class="pl-k">default</span>: { <span class="pl-k">break</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L559" class="blob-num js-line-number" data-line-number="559"></td>
-        <td id="LC559" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L560" class="blob-num js-line-number" data-line-number="560"></td>
-        <td id="LC560" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L561" class="blob-num js-line-number" data-line-number="561"></td>
-        <td id="LC561" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L562" class="blob-num js-line-number" data-line-number="562"></td>
-        <td id="LC562" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L563" class="blob-num js-line-number" data-line-number="563"></td>
-        <td id="LC563" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">int</span> <span class="pl-en">mpc_input_success</span>(<span class="pl-s3">mpc_input_t</span> *i, <span class="pl-st">char</span> c, <span class="pl-st">char</span> **o) {</td>
-      </tr>
-      <tr>
-        <td id="L564" class="blob-num js-line-number" data-line-number="564"></td>
-        <td id="LC564" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L565" class="blob-num js-line-number" data-line-number="565"></td>
-        <td id="LC565" class="blob-code js-file-line">  <span class="pl-k">if</span> (i-&gt;type == MPC_INPUT_PIPE &amp;&amp;</td>
-      </tr>
-      <tr>
-        <td id="L566" class="blob-num js-line-number" data-line-number="566"></td>
-        <td id="LC566" class="blob-code js-file-line">      i-&gt;buffer &amp;&amp;</td>
-      </tr>
-      <tr>
-        <td id="L567" class="blob-num js-line-number" data-line-number="567"></td>
-        <td id="LC567" class="blob-code js-file-line">      !<span class="pl-s3">mpc_input_buffer_in_range</span>(i)) {</td>
-      </tr>
-      <tr>
-        <td id="L568" class="blob-num js-line-number" data-line-number="568"></td>
-        <td id="LC568" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L569" class="blob-num js-line-number" data-line-number="569"></td>
-        <td id="LC569" class="blob-code js-file-line">    i-&gt;buffer = <span class="pl-s3">realloc</span>(i-&gt;buffer, <span class="pl-s3">strlen</span>(i-&gt;buffer) + <span class="pl-c1">2</span>);</td>
-      </tr>
-      <tr>
-        <td id="L570" class="blob-num js-line-number" data-line-number="570"></td>
-        <td id="LC570" class="blob-code js-file-line">    i-&gt;buffer[<span class="pl-s3">strlen</span>(i-&gt;buffer) + <span class="pl-c1">1</span>] = <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-ii">\0</span><span class="pl-pds">&#39;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L571" class="blob-num js-line-number" data-line-number="571"></td>
-        <td id="LC571" class="blob-code js-file-line">    i-&gt;buffer[<span class="pl-s3">strlen</span>(i-&gt;buffer) + <span class="pl-c1">0</span>] = c;</td>
-      </tr>
-      <tr>
-        <td id="L572" class="blob-num js-line-number" data-line-number="572"></td>
-        <td id="LC572" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L573" class="blob-num js-line-number" data-line-number="573"></td>
-        <td id="LC573" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L574" class="blob-num js-line-number" data-line-number="574"></td>
-        <td id="LC574" class="blob-code js-file-line">  i-&gt;last = c;</td>
-      </tr>
-      <tr>
-        <td id="L575" class="blob-num js-line-number" data-line-number="575"></td>
-        <td id="LC575" class="blob-code js-file-line">  i-&gt;state.<span class="pl-vo">pos</span>++;</td>
-      </tr>
-      <tr>
-        <td id="L576" class="blob-num js-line-number" data-line-number="576"></td>
-        <td id="LC576" class="blob-code js-file-line">  i-&gt;state.<span class="pl-vo">col</span>++;</td>
-      </tr>
-      <tr>
-        <td id="L577" class="blob-num js-line-number" data-line-number="577"></td>
-        <td id="LC577" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L578" class="blob-num js-line-number" data-line-number="578"></td>
-        <td id="LC578" class="blob-code js-file-line">  <span class="pl-k">if</span> (c == <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-cce">\n</span><span class="pl-pds">&#39;</span></span>) {</td>
-      </tr>
-      <tr>
-        <td id="L579" class="blob-num js-line-number" data-line-number="579"></td>
-        <td id="LC579" class="blob-code js-file-line">    i-&gt;state.<span class="pl-vo">col</span> = <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L580" class="blob-num js-line-number" data-line-number="580"></td>
-        <td id="LC580" class="blob-code js-file-line">    i-&gt;state.<span class="pl-vo">row</span>++;</td>
-      </tr>
-      <tr>
-        <td id="L581" class="blob-num js-line-number" data-line-number="581"></td>
-        <td id="LC581" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L582" class="blob-num js-line-number" data-line-number="582"></td>
-        <td id="LC582" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L583" class="blob-num js-line-number" data-line-number="583"></td>
-        <td id="LC583" class="blob-code js-file-line">  <span class="pl-k">if</span> (o) {</td>
-      </tr>
-      <tr>
-        <td id="L584" class="blob-num js-line-number" data-line-number="584"></td>
-        <td id="LC584" class="blob-code js-file-line">    (*o) = <span class="pl-s3">malloc</span>(<span class="pl-c1">2</span>);</td>
-      </tr>
-      <tr>
-        <td id="L585" class="blob-num js-line-number" data-line-number="585"></td>
-        <td id="LC585" class="blob-code js-file-line">    (*o)[<span class="pl-c1">0</span>] = c;</td>
-      </tr>
-      <tr>
-        <td id="L586" class="blob-num js-line-number" data-line-number="586"></td>
-        <td id="LC586" class="blob-code js-file-line">    (*o)[<span class="pl-c1">1</span>] = <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-ii">\0</span><span class="pl-pds">&#39;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L587" class="blob-num js-line-number" data-line-number="587"></td>
-        <td id="LC587" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L588" class="blob-num js-line-number" data-line-number="588"></td>
-        <td id="LC588" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L589" class="blob-num js-line-number" data-line-number="589"></td>
-        <td id="LC589" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-c1">1</span>;</td>
-      </tr>
-      <tr>
-        <td id="L590" class="blob-num js-line-number" data-line-number="590"></td>
-        <td id="LC590" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L591" class="blob-num js-line-number" data-line-number="591"></td>
-        <td id="LC591" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L592" class="blob-num js-line-number" data-line-number="592"></td>
-        <td id="LC592" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">int</span> <span class="pl-en">mpc_input_any</span>(<span class="pl-s3">mpc_input_t</span> *i, <span class="pl-st">char</span> **o) {</td>
-      </tr>
-      <tr>
-        <td id="L593" class="blob-num js-line-number" data-line-number="593"></td>
-        <td id="LC593" class="blob-code js-file-line">  <span class="pl-st">char</span> x = <span class="pl-s3">mpc_input_getc</span>(i);</td>
-      </tr>
-      <tr>
-        <td id="L594" class="blob-num js-line-number" data-line-number="594"></td>
-        <td id="LC594" class="blob-code js-file-line">  <span class="pl-k">if</span> (<span class="pl-s3">mpc_input_terminated</span>(i)) { <span class="pl-k">return</span> <span class="pl-c1">0</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L595" class="blob-num js-line-number" data-line-number="595"></td>
-        <td id="LC595" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">mpc_input_success</span>(i, x, o);</td>
-      </tr>
-      <tr>
-        <td id="L596" class="blob-num js-line-number" data-line-number="596"></td>
-        <td id="LC596" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L597" class="blob-num js-line-number" data-line-number="597"></td>
-        <td id="LC597" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L598" class="blob-num js-line-number" data-line-number="598"></td>
-        <td id="LC598" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">int</span> <span class="pl-en">mpc_input_char</span>(<span class="pl-s3">mpc_input_t</span> *i, <span class="pl-st">char</span> c, <span class="pl-st">char</span> **o) {</td>
-      </tr>
-      <tr>
-        <td id="L599" class="blob-num js-line-number" data-line-number="599"></td>
-        <td id="LC599" class="blob-code js-file-line">  <span class="pl-st">char</span> x = <span class="pl-s3">mpc_input_getc</span>(i);</td>
-      </tr>
-      <tr>
-        <td id="L600" class="blob-num js-line-number" data-line-number="600"></td>
-        <td id="LC600" class="blob-code js-file-line">  <span class="pl-k">if</span> (<span class="pl-s3">mpc_input_terminated</span>(i)) { <span class="pl-k">return</span> <span class="pl-c1">0</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L601" class="blob-num js-line-number" data-line-number="601"></td>
-        <td id="LC601" class="blob-code js-file-line">  <span class="pl-k">return</span> x == c ? <span class="pl-s3">mpc_input_success</span>(i, x, o) : <span class="pl-s3">mpc_input_failure</span>(i, x);</td>
-      </tr>
-      <tr>
-        <td id="L602" class="blob-num js-line-number" data-line-number="602"></td>
-        <td id="LC602" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L603" class="blob-num js-line-number" data-line-number="603"></td>
-        <td id="LC603" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L604" class="blob-num js-line-number" data-line-number="604"></td>
-        <td id="LC604" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">int</span> <span class="pl-en">mpc_input_range</span>(<span class="pl-s3">mpc_input_t</span> *i, <span class="pl-st">char</span> c, <span class="pl-st">char</span> d, <span class="pl-st">char</span> **o) {</td>
-      </tr>
-      <tr>
-        <td id="L605" class="blob-num js-line-number" data-line-number="605"></td>
-        <td id="LC605" class="blob-code js-file-line">  <span class="pl-st">char</span> x = <span class="pl-s3">mpc_input_getc</span>(i);</td>
-      </tr>
-      <tr>
-        <td id="L606" class="blob-num js-line-number" data-line-number="606"></td>
-        <td id="LC606" class="blob-code js-file-line">  <span class="pl-k">if</span> (<span class="pl-s3">mpc_input_terminated</span>(i)) { <span class="pl-k">return</span> <span class="pl-c1">0</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L607" class="blob-num js-line-number" data-line-number="607"></td>
-        <td id="LC607" class="blob-code js-file-line">  <span class="pl-k">return</span> x &gt;= c &amp;&amp; x &lt;= d ? <span class="pl-s3">mpc_input_success</span>(i, x, o) : <span class="pl-s3">mpc_input_failure</span>(i, x);  </td>
-      </tr>
-      <tr>
-        <td id="L608" class="blob-num js-line-number" data-line-number="608"></td>
-        <td id="LC608" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L609" class="blob-num js-line-number" data-line-number="609"></td>
-        <td id="LC609" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L610" class="blob-num js-line-number" data-line-number="610"></td>
-        <td id="LC610" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">int</span> <span class="pl-en">mpc_input_oneof</span>(<span class="pl-s3">mpc_input_t</span> *i, <span class="pl-s">const</span> <span class="pl-st">char</span> *c, <span class="pl-st">char</span> **o) {</td>
-      </tr>
-      <tr>
-        <td id="L611" class="blob-num js-line-number" data-line-number="611"></td>
-        <td id="LC611" class="blob-code js-file-line">  <span class="pl-st">char</span> x = <span class="pl-s3">mpc_input_getc</span>(i);</td>
-      </tr>
-      <tr>
-        <td id="L612" class="blob-num js-line-number" data-line-number="612"></td>
-        <td id="LC612" class="blob-code js-file-line">  <span class="pl-k">if</span> (<span class="pl-s3">mpc_input_terminated</span>(i)) { <span class="pl-k">return</span> <span class="pl-c1">0</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L613" class="blob-num js-line-number" data-line-number="613"></td>
-        <td id="LC613" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">strchr</span>(c, x) != <span class="pl-c1">0</span> ? <span class="pl-s3">mpc_input_success</span>(i, x, o) : <span class="pl-s3">mpc_input_failure</span>(i, x);  </td>
-      </tr>
-      <tr>
-        <td id="L614" class="blob-num js-line-number" data-line-number="614"></td>
-        <td id="LC614" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L615" class="blob-num js-line-number" data-line-number="615"></td>
-        <td id="LC615" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L616" class="blob-num js-line-number" data-line-number="616"></td>
-        <td id="LC616" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">int</span> <span class="pl-en">mpc_input_noneof</span>(<span class="pl-s3">mpc_input_t</span> *i, <span class="pl-s">const</span> <span class="pl-st">char</span> *c, <span class="pl-st">char</span> **o) {</td>
-      </tr>
-      <tr>
-        <td id="L617" class="blob-num js-line-number" data-line-number="617"></td>
-        <td id="LC617" class="blob-code js-file-line">  <span class="pl-st">char</span> x = <span class="pl-s3">mpc_input_getc</span>(i);</td>
-      </tr>
-      <tr>
-        <td id="L618" class="blob-num js-line-number" data-line-number="618"></td>
-        <td id="LC618" class="blob-code js-file-line">  <span class="pl-k">if</span> (<span class="pl-s3">mpc_input_terminated</span>(i)) { <span class="pl-k">return</span> <span class="pl-c1">0</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L619" class="blob-num js-line-number" data-line-number="619"></td>
-        <td id="LC619" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">strchr</span>(c, x) == <span class="pl-c1">0</span> ? <span class="pl-s3">mpc_input_success</span>(i, x, o) : <span class="pl-s3">mpc_input_failure</span>(i, x);  </td>
-      </tr>
-      <tr>
-        <td id="L620" class="blob-num js-line-number" data-line-number="620"></td>
-        <td id="LC620" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L621" class="blob-num js-line-number" data-line-number="621"></td>
-        <td id="LC621" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L622" class="blob-num js-line-number" data-line-number="622"></td>
-        <td id="LC622" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">int</span> <span class="pl-en">mpc_input_satisfy</span>(<span class="pl-s3">mpc_input_t</span> *i, <span class="pl-st">int</span>(*cond)(<span class="pl-st">char</span>), char **o) {</td>
-      </tr>
-      <tr>
-        <td id="L623" class="blob-num js-line-number" data-line-number="623"></td>
-        <td id="LC623" class="blob-code js-file-line">  <span class="pl-st">char</span> x = <span class="pl-s3">mpc_input_getc</span>(i);</td>
-      </tr>
-      <tr>
-        <td id="L624" class="blob-num js-line-number" data-line-number="624"></td>
-        <td id="LC624" class="blob-code js-file-line">  <span class="pl-k">if</span> (<span class="pl-s3">mpc_input_terminated</span>(i)) { <span class="pl-k">return</span> <span class="pl-c1">0</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L625" class="blob-num js-line-number" data-line-number="625"></td>
-        <td id="LC625" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">cond</span>(x) ? <span class="pl-s3">mpc_input_success</span>(i, x, o) : <span class="pl-s3">mpc_input_failure</span>(i, x);  </td>
-      </tr>
-      <tr>
-        <td id="L626" class="blob-num js-line-number" data-line-number="626"></td>
-        <td id="LC626" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L627" class="blob-num js-line-number" data-line-number="627"></td>
-        <td id="LC627" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L628" class="blob-num js-line-number" data-line-number="628"></td>
-        <td id="LC628" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">int</span> <span class="pl-en">mpc_input_string</span>(<span class="pl-s3">mpc_input_t</span> *i, <span class="pl-s">const</span> <span class="pl-st">char</span> *c, <span class="pl-st">char</span> **o) {</td>
-      </tr>
-      <tr>
-        <td id="L629" class="blob-num js-line-number" data-line-number="629"></td>
-        <td id="LC629" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L630" class="blob-num js-line-number" data-line-number="630"></td>
-        <td id="LC630" class="blob-code js-file-line">  <span class="pl-st">char</span> *co = <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L631" class="blob-num js-line-number" data-line-number="631"></td>
-        <td id="LC631" class="blob-code js-file-line">  <span class="pl-s">const</span> <span class="pl-st">char</span> *x = c;</td>
-      </tr>
-      <tr>
-        <td id="L632" class="blob-num js-line-number" data-line-number="632"></td>
-        <td id="LC632" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L633" class="blob-num js-line-number" data-line-number="633"></td>
-        <td id="LC633" class="blob-code js-file-line">  <span class="pl-s3">mpc_input_mark</span>(i);</td>
-      </tr>
-      <tr>
-        <td id="L634" class="blob-num js-line-number" data-line-number="634"></td>
-        <td id="LC634" class="blob-code js-file-line">  <span class="pl-k">while</span> (*x) {</td>
-      </tr>
-      <tr>
-        <td id="L635" class="blob-num js-line-number" data-line-number="635"></td>
-        <td id="LC635" class="blob-code js-file-line">    <span class="pl-k">if</span> (<span class="pl-s3">mpc_input_char</span>(i, *x, &amp;co)) {</td>
-      </tr>
-      <tr>
-        <td id="L636" class="blob-num js-line-number" data-line-number="636"></td>
-        <td id="LC636" class="blob-code js-file-line">      <span class="pl-s3">free</span>(co);</td>
-      </tr>
-      <tr>
-        <td id="L637" class="blob-num js-line-number" data-line-number="637"></td>
-        <td id="LC637" class="blob-code js-file-line">    } <span class="pl-k">else</span> {</td>
-      </tr>
-      <tr>
-        <td id="L638" class="blob-num js-line-number" data-line-number="638"></td>
-        <td id="LC638" class="blob-code js-file-line">      <span class="pl-s3">mpc_input_rewind</span>(i);</td>
-      </tr>
-      <tr>
-        <td id="L639" class="blob-num js-line-number" data-line-number="639"></td>
-        <td id="LC639" class="blob-code js-file-line">      <span class="pl-k">return</span> <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L640" class="blob-num js-line-number" data-line-number="640"></td>
-        <td id="LC640" class="blob-code js-file-line">    }</td>
-      </tr>
-      <tr>
-        <td id="L641" class="blob-num js-line-number" data-line-number="641"></td>
-        <td id="LC641" class="blob-code js-file-line">    x++;</td>
-      </tr>
-      <tr>
-        <td id="L642" class="blob-num js-line-number" data-line-number="642"></td>
-        <td id="LC642" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L643" class="blob-num js-line-number" data-line-number="643"></td>
-        <td id="LC643" class="blob-code js-file-line">  <span class="pl-s3">mpc_input_unmark</span>(i);</td>
-      </tr>
-      <tr>
-        <td id="L644" class="blob-num js-line-number" data-line-number="644"></td>
-        <td id="LC644" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L645" class="blob-num js-line-number" data-line-number="645"></td>
-        <td id="LC645" class="blob-code js-file-line">  *o = <span class="pl-s3">malloc</span>(<span class="pl-s3">strlen</span>(c) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L646" class="blob-num js-line-number" data-line-number="646"></td>
-        <td id="LC646" class="blob-code js-file-line">  <span class="pl-s3">strcpy</span>(*o, c);</td>
-      </tr>
-      <tr>
-        <td id="L647" class="blob-num js-line-number" data-line-number="647"></td>
-        <td id="LC647" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-c1">1</span>;</td>
-      </tr>
-      <tr>
-        <td id="L648" class="blob-num js-line-number" data-line-number="648"></td>
-        <td id="LC648" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L649" class="blob-num js-line-number" data-line-number="649"></td>
-        <td id="LC649" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L650" class="blob-num js-line-number" data-line-number="650"></td>
-        <td id="LC650" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">int</span> <span class="pl-en">mpc_input_anchor</span>(<span class="pl-s3">mpc_input_t</span>* i, <span class="pl-st">int</span>(*f)(<span class="pl-st">char</span>,<span class="pl-st">char</span>)) {</td>
-      </tr>
-      <tr>
-        <td id="L651" class="blob-num js-line-number" data-line-number="651"></td>
-        <td id="LC651" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">f</span>(i-&gt;last, <span class="pl-s3">mpc_input_peekc</span>(i));</td>
-      </tr>
-      <tr>
-        <td id="L652" class="blob-num js-line-number" data-line-number="652"></td>
-        <td id="LC652" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L653" class="blob-num js-line-number" data-line-number="653"></td>
-        <td id="LC653" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L654" class="blob-num js-line-number" data-line-number="654"></td>
-        <td id="LC654" class="blob-code js-file-line"><span class="pl-c">/*</span></td>
-      </tr>
-      <tr>
-        <td id="L655" class="blob-num js-line-number" data-line-number="655"></td>
-        <td id="LC655" class="blob-code js-file-line"><span class="pl-c">** Parser Type</span></td>
-      </tr>
-      <tr>
-        <td id="L656" class="blob-num js-line-number" data-line-number="656"></td>
-        <td id="LC656" class="blob-code js-file-line"><span class="pl-c">*/</span></td>
-      </tr>
-      <tr>
-        <td id="L657" class="blob-num js-line-number" data-line-number="657"></td>
-        <td id="LC657" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L658" class="blob-num js-line-number" data-line-number="658"></td>
-        <td id="LC658" class="blob-code js-file-line"><span class="pl-st">enum</span> {</td>
-      </tr>
-      <tr>
-        <td id="L659" class="blob-num js-line-number" data-line-number="659"></td>
-        <td id="LC659" class="blob-code js-file-line">  MPC_TYPE_UNDEFINED = <span class="pl-c1">0</span>,</td>
-      </tr>
-      <tr>
-        <td id="L660" class="blob-num js-line-number" data-line-number="660"></td>
-        <td id="LC660" class="blob-code js-file-line">  MPC_TYPE_PASS      = <span class="pl-c1">1</span>,</td>
-      </tr>
-      <tr>
-        <td id="L661" class="blob-num js-line-number" data-line-number="661"></td>
-        <td id="LC661" class="blob-code js-file-line">  MPC_TYPE_FAIL      = <span class="pl-c1">2</span>,</td>
-      </tr>
-      <tr>
-        <td id="L662" class="blob-num js-line-number" data-line-number="662"></td>
-        <td id="LC662" class="blob-code js-file-line">  MPC_TYPE_LIFT      = <span class="pl-c1">3</span>,</td>
-      </tr>
-      <tr>
-        <td id="L663" class="blob-num js-line-number" data-line-number="663"></td>
-        <td id="LC663" class="blob-code js-file-line">  MPC_TYPE_LIFT_VAL  = <span class="pl-c1">4</span>,</td>
-      </tr>
-      <tr>
-        <td id="L664" class="blob-num js-line-number" data-line-number="664"></td>
-        <td id="LC664" class="blob-code js-file-line">  MPC_TYPE_EXPECT    = <span class="pl-c1">5</span>,</td>
-      </tr>
-      <tr>
-        <td id="L665" class="blob-num js-line-number" data-line-number="665"></td>
-        <td id="LC665" class="blob-code js-file-line">  MPC_TYPE_ANCHOR    = <span class="pl-c1">6</span>,</td>
-      </tr>
-      <tr>
-        <td id="L666" class="blob-num js-line-number" data-line-number="666"></td>
-        <td id="LC666" class="blob-code js-file-line">  MPC_TYPE_STATE     = <span class="pl-c1">7</span>,</td>
-      </tr>
-      <tr>
-        <td id="L667" class="blob-num js-line-number" data-line-number="667"></td>
-        <td id="LC667" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L668" class="blob-num js-line-number" data-line-number="668"></td>
-        <td id="LC668" class="blob-code js-file-line">  MPC_TYPE_ANY       = <span class="pl-c1">8</span>,</td>
-      </tr>
-      <tr>
-        <td id="L669" class="blob-num js-line-number" data-line-number="669"></td>
-        <td id="LC669" class="blob-code js-file-line">  MPC_TYPE_SINGLE    = <span class="pl-c1">9</span>,</td>
-      </tr>
-      <tr>
-        <td id="L670" class="blob-num js-line-number" data-line-number="670"></td>
-        <td id="LC670" class="blob-code js-file-line">  MPC_TYPE_ONEOF     = <span class="pl-c1">10</span>,</td>
-      </tr>
-      <tr>
-        <td id="L671" class="blob-num js-line-number" data-line-number="671"></td>
-        <td id="LC671" class="blob-code js-file-line">  MPC_TYPE_NONEOF    = <span class="pl-c1">11</span>,</td>
-      </tr>
-      <tr>
-        <td id="L672" class="blob-num js-line-number" data-line-number="672"></td>
-        <td id="LC672" class="blob-code js-file-line">  MPC_TYPE_RANGE     = <span class="pl-c1">12</span>,</td>
-      </tr>
-      <tr>
-        <td id="L673" class="blob-num js-line-number" data-line-number="673"></td>
-        <td id="LC673" class="blob-code js-file-line">  MPC_TYPE_SATISFY   = <span class="pl-c1">13</span>,</td>
-      </tr>
-      <tr>
-        <td id="L674" class="blob-num js-line-number" data-line-number="674"></td>
-        <td id="LC674" class="blob-code js-file-line">  MPC_TYPE_STRING    = <span class="pl-c1">14</span>,</td>
-      </tr>
-      <tr>
-        <td id="L675" class="blob-num js-line-number" data-line-number="675"></td>
-        <td id="LC675" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L676" class="blob-num js-line-number" data-line-number="676"></td>
-        <td id="LC676" class="blob-code js-file-line">  MPC_TYPE_APPLY     = <span class="pl-c1">15</span>,</td>
-      </tr>
-      <tr>
-        <td id="L677" class="blob-num js-line-number" data-line-number="677"></td>
-        <td id="LC677" class="blob-code js-file-line">  MPC_TYPE_APPLY_TO  = <span class="pl-c1">16</span>,</td>
-      </tr>
-      <tr>
-        <td id="L678" class="blob-num js-line-number" data-line-number="678"></td>
-        <td id="LC678" class="blob-code js-file-line">  MPC_TYPE_PREDICT   = <span class="pl-c1">17</span>,</td>
-      </tr>
-      <tr>
-        <td id="L679" class="blob-num js-line-number" data-line-number="679"></td>
-        <td id="LC679" class="blob-code js-file-line">  MPC_TYPE_NOT       = <span class="pl-c1">18</span>,</td>
-      </tr>
-      <tr>
-        <td id="L680" class="blob-num js-line-number" data-line-number="680"></td>
-        <td id="LC680" class="blob-code js-file-line">  MPC_TYPE_MAYBE     = <span class="pl-c1">19</span>,</td>
-      </tr>
-      <tr>
-        <td id="L681" class="blob-num js-line-number" data-line-number="681"></td>
-        <td id="LC681" class="blob-code js-file-line">  MPC_TYPE_MANY      = <span class="pl-c1">20</span>,</td>
-      </tr>
-      <tr>
-        <td id="L682" class="blob-num js-line-number" data-line-number="682"></td>
-        <td id="LC682" class="blob-code js-file-line">  MPC_TYPE_MANY1     = <span class="pl-c1">21</span>,</td>
-      </tr>
-      <tr>
-        <td id="L683" class="blob-num js-line-number" data-line-number="683"></td>
-        <td id="LC683" class="blob-code js-file-line">  MPC_TYPE_COUNT     = <span class="pl-c1">22</span>,</td>
-      </tr>
-      <tr>
-        <td id="L684" class="blob-num js-line-number" data-line-number="684"></td>
-        <td id="LC684" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L685" class="blob-num js-line-number" data-line-number="685"></td>
-        <td id="LC685" class="blob-code js-file-line">  MPC_TYPE_OR        = <span class="pl-c1">23</span>,</td>
-      </tr>
-      <tr>
-        <td id="L686" class="blob-num js-line-number" data-line-number="686"></td>
-        <td id="LC686" class="blob-code js-file-line">  MPC_TYPE_AND       = <span class="pl-c1">24</span></td>
-      </tr>
-      <tr>
-        <td id="L687" class="blob-num js-line-number" data-line-number="687"></td>
-        <td id="LC687" class="blob-code js-file-line">};</td>
-      </tr>
-      <tr>
-        <td id="L688" class="blob-num js-line-number" data-line-number="688"></td>
-        <td id="LC688" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L689" class="blob-num js-line-number" data-line-number="689"></td>
-        <td id="LC689" class="blob-code js-file-line"><span class="pl-st">typedef</span> <span class="pl-st">struct</span> { <span class="pl-st">char</span> *m; } <span class="pl-s3">mpc_pdata_fail_t</span>;</td>
-      </tr>
-      <tr>
-        <td id="L690" class="blob-num js-line-number" data-line-number="690"></td>
-        <td id="LC690" class="blob-code js-file-line"><span class="pl-st">typedef</span> <span class="pl-st">struct</span> { <span class="pl-s3">mpc_ctor_t</span> lf; <span class="pl-st">void</span> *x; } <span class="pl-s3">mpc_pdata_lift_t</span>;</td>
-      </tr>
-      <tr>
-        <td id="L691" class="blob-num js-line-number" data-line-number="691"></td>
-        <td id="LC691" class="blob-code js-file-line"><span class="pl-st">typedef</span> <span class="pl-st">struct</span> { <span class="pl-s3">mpc_parser_t</span> *x; <span class="pl-st">char</span> *m; } <span class="pl-s3">mpc_pdata_expect_t</span>;</td>
-      </tr>
-      <tr>
-        <td id="L692" class="blob-num js-line-number" data-line-number="692"></td>
-        <td id="LC692" class="blob-code js-file-line"><span class="pl-st">typedef</span> <span class="pl-st">struct</span> { <span class="pl-s3">int</span>(*f)(<span class="pl-st">char</span>,<span class="pl-st">char</span>); } <span class="pl-s3">mpc_pdata_anchor_t</span>;</td>
-      </tr>
-      <tr>
-        <td id="L693" class="blob-num js-line-number" data-line-number="693"></td>
-        <td id="LC693" class="blob-code js-file-line"><span class="pl-st">typedef</span> <span class="pl-st">struct</span> { <span class="pl-st">char</span> x; } <span class="pl-s3">mpc_pdata_single_t</span>;</td>
-      </tr>
-      <tr>
-        <td id="L694" class="blob-num js-line-number" data-line-number="694"></td>
-        <td id="LC694" class="blob-code js-file-line"><span class="pl-st">typedef</span> <span class="pl-st">struct</span> { <span class="pl-st">char</span> x; <span class="pl-st">char</span> y; } <span class="pl-s3">mpc_pdata_range_t</span>;</td>
-      </tr>
-      <tr>
-        <td id="L695" class="blob-num js-line-number" data-line-number="695"></td>
-        <td id="LC695" class="blob-code js-file-line"><span class="pl-st">typedef</span> <span class="pl-st">struct</span> { <span class="pl-s3">int</span>(*f)(<span class="pl-st">char</span>); } <span class="pl-s3">mpc_pdata_satisfy_t</span>;</td>
-      </tr>
-      <tr>
-        <td id="L696" class="blob-num js-line-number" data-line-number="696"></td>
-        <td id="LC696" class="blob-code js-file-line"><span class="pl-st">typedef</span> <span class="pl-st">struct</span> { <span class="pl-st">char</span> *x; } <span class="pl-s3">mpc_pdata_string_t</span>;</td>
-      </tr>
-      <tr>
-        <td id="L697" class="blob-num js-line-number" data-line-number="697"></td>
-        <td id="LC697" class="blob-code js-file-line"><span class="pl-st">typedef</span> <span class="pl-st">struct</span> { <span class="pl-s3">mpc_parser_t</span> *x; <span class="pl-s3">mpc_apply_t</span> f; } <span class="pl-s3">mpc_pdata_apply_t</span>;</td>
-      </tr>
-      <tr>
-        <td id="L698" class="blob-num js-line-number" data-line-number="698"></td>
-        <td id="LC698" class="blob-code js-file-line"><span class="pl-st">typedef</span> <span class="pl-st">struct</span> { <span class="pl-s3">mpc_parser_t</span> *x; <span class="pl-s3">mpc_apply_to_t</span> f; <span class="pl-st">void</span> *d; } <span class="pl-s3">mpc_pdata_apply_to_t</span>;</td>
-      </tr>
-      <tr>
-        <td id="L699" class="blob-num js-line-number" data-line-number="699"></td>
-        <td id="LC699" class="blob-code js-file-line"><span class="pl-st">typedef</span> <span class="pl-st">struct</span> { <span class="pl-s3">mpc_parser_t</span> *x; } <span class="pl-s3">mpc_pdata_predict_t</span>;</td>
-      </tr>
-      <tr>
-        <td id="L700" class="blob-num js-line-number" data-line-number="700"></td>
-        <td id="LC700" class="blob-code js-file-line"><span class="pl-st">typedef</span> <span class="pl-st">struct</span> { <span class="pl-s3">mpc_parser_t</span> *x; <span class="pl-s3">mpc_dtor_t</span> dx; <span class="pl-s3">mpc_ctor_t</span> lf; } <span class="pl-s3">mpc_pdata_not_t</span>;</td>
-      </tr>
-      <tr>
-        <td id="L701" class="blob-num js-line-number" data-line-number="701"></td>
-        <td id="LC701" class="blob-code js-file-line"><span class="pl-st">typedef</span> <span class="pl-st">struct</span> { <span class="pl-st">int</span> n; <span class="pl-s3">mpc_fold_t</span> f; <span class="pl-s3">mpc_parser_t</span> *x; <span class="pl-s3">mpc_dtor_t</span> dx; } <span class="pl-s3">mpc_pdata_repeat_t</span>;</td>
-      </tr>
-      <tr>
-        <td id="L702" class="blob-num js-line-number" data-line-number="702"></td>
-        <td id="LC702" class="blob-code js-file-line"><span class="pl-st">typedef</span> <span class="pl-st">struct</span> { <span class="pl-st">int</span> n; <span class="pl-s3">mpc_parser_t</span> **xs; } <span class="pl-s3">mpc_pdata_or_t</span>;</td>
-      </tr>
-      <tr>
-        <td id="L703" class="blob-num js-line-number" data-line-number="703"></td>
-        <td id="LC703" class="blob-code js-file-line"><span class="pl-st">typedef</span> <span class="pl-st">struct</span> { <span class="pl-st">int</span> n; <span class="pl-s3">mpc_fold_t</span> f; <span class="pl-s3">mpc_parser_t</span> **xs; <span class="pl-s3">mpc_dtor_t</span> *dxs;  } <span class="pl-s3">mpc_pdata_and_t</span>;</td>
-      </tr>
-      <tr>
-        <td id="L704" class="blob-num js-line-number" data-line-number="704"></td>
-        <td id="LC704" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L705" class="blob-num js-line-number" data-line-number="705"></td>
-        <td id="LC705" class="blob-code js-file-line"><span class="pl-st">typedef</span> <span class="pl-st">union</span> {</td>
-      </tr>
-      <tr>
-        <td id="L706" class="blob-num js-line-number" data-line-number="706"></td>
-        <td id="LC706" class="blob-code js-file-line">  <span class="pl-s3">mpc_pdata_fail_t</span> fail;</td>
-      </tr>
-      <tr>
-        <td id="L707" class="blob-num js-line-number" data-line-number="707"></td>
-        <td id="LC707" class="blob-code js-file-line">  <span class="pl-s3">mpc_pdata_lift_t</span> lift;</td>
-      </tr>
-      <tr>
-        <td id="L708" class="blob-num js-line-number" data-line-number="708"></td>
-        <td id="LC708" class="blob-code js-file-line">  <span class="pl-s3">mpc_pdata_expect_t</span> expect;</td>
-      </tr>
-      <tr>
-        <td id="L709" class="blob-num js-line-number" data-line-number="709"></td>
-        <td id="LC709" class="blob-code js-file-line">  <span class="pl-s3">mpc_pdata_anchor_t</span> anchor;</td>
-      </tr>
-      <tr>
-        <td id="L710" class="blob-num js-line-number" data-line-number="710"></td>
-        <td id="LC710" class="blob-code js-file-line">  <span class="pl-s3">mpc_pdata_single_t</span> single;</td>
-      </tr>
-      <tr>
-        <td id="L711" class="blob-num js-line-number" data-line-number="711"></td>
-        <td id="LC711" class="blob-code js-file-line">  <span class="pl-s3">mpc_pdata_range_t</span> range;</td>
-      </tr>
-      <tr>
-        <td id="L712" class="blob-num js-line-number" data-line-number="712"></td>
-        <td id="LC712" class="blob-code js-file-line">  <span class="pl-s3">mpc_pdata_satisfy_t</span> satisfy;</td>
-      </tr>
-      <tr>
-        <td id="L713" class="blob-num js-line-number" data-line-number="713"></td>
-        <td id="LC713" class="blob-code js-file-line">  <span class="pl-s3">mpc_pdata_string_t</span> string;</td>
-      </tr>
-      <tr>
-        <td id="L714" class="blob-num js-line-number" data-line-number="714"></td>
-        <td id="LC714" class="blob-code js-file-line">  <span class="pl-s3">mpc_pdata_apply_t</span> apply;</td>
-      </tr>
-      <tr>
-        <td id="L715" class="blob-num js-line-number" data-line-number="715"></td>
-        <td id="LC715" class="blob-code js-file-line">  <span class="pl-s3">mpc_pdata_apply_to_t</span> apply_to;</td>
-      </tr>
-      <tr>
-        <td id="L716" class="blob-num js-line-number" data-line-number="716"></td>
-        <td id="LC716" class="blob-code js-file-line">  <span class="pl-s3">mpc_pdata_predict_t</span> predict;</td>
-      </tr>
-      <tr>
-        <td id="L717" class="blob-num js-line-number" data-line-number="717"></td>
-        <td id="LC717" class="blob-code js-file-line">  <span class="pl-s3">mpc_pdata_not_t</span> not;</td>
-      </tr>
-      <tr>
-        <td id="L718" class="blob-num js-line-number" data-line-number="718"></td>
-        <td id="LC718" class="blob-code js-file-line">  <span class="pl-s3">mpc_pdata_repeat_t</span> repeat;</td>
-      </tr>
-      <tr>
-        <td id="L719" class="blob-num js-line-number" data-line-number="719"></td>
-        <td id="LC719" class="blob-code js-file-line">  <span class="pl-s3">mpc_pdata_and_t</span> and;</td>
-      </tr>
-      <tr>
-        <td id="L720" class="blob-num js-line-number" data-line-number="720"></td>
-        <td id="LC720" class="blob-code js-file-line">  <span class="pl-s3">mpc_pdata_or_t</span> or;</td>
-      </tr>
-      <tr>
-        <td id="L721" class="blob-num js-line-number" data-line-number="721"></td>
-        <td id="LC721" class="blob-code js-file-line">} <span class="pl-s3">mpc_pdata_t</span>;</td>
-      </tr>
-      <tr>
-        <td id="L722" class="blob-num js-line-number" data-line-number="722"></td>
-        <td id="LC722" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L723" class="blob-num js-line-number" data-line-number="723"></td>
-        <td id="LC723" class="blob-code js-file-line"><span class="pl-st">struct</span> <span class="pl-s3">mpc_parser_t</span> {</td>
-      </tr>
-      <tr>
-        <td id="L724" class="blob-num js-line-number" data-line-number="724"></td>
-        <td id="LC724" class="blob-code js-file-line">  <span class="pl-st">char</span> retained;</td>
-      </tr>
-      <tr>
-        <td id="L725" class="blob-num js-line-number" data-line-number="725"></td>
-        <td id="LC725" class="blob-code js-file-line">  <span class="pl-st">char</span> *name;</td>
-      </tr>
-      <tr>
-        <td id="L726" class="blob-num js-line-number" data-line-number="726"></td>
-        <td id="LC726" class="blob-code js-file-line">  <span class="pl-st">char</span> type;</td>
-      </tr>
-      <tr>
-        <td id="L727" class="blob-num js-line-number" data-line-number="727"></td>
-        <td id="LC727" class="blob-code js-file-line">  <span class="pl-s3">mpc_pdata_t</span> data;</td>
-      </tr>
-      <tr>
-        <td id="L728" class="blob-num js-line-number" data-line-number="728"></td>
-        <td id="LC728" class="blob-code js-file-line">};</td>
-      </tr>
-      <tr>
-        <td id="L729" class="blob-num js-line-number" data-line-number="729"></td>
-        <td id="LC729" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L730" class="blob-num js-line-number" data-line-number="730"></td>
-        <td id="LC730" class="blob-code js-file-line"><span class="pl-c">/*</span></td>
-      </tr>
-      <tr>
-        <td id="L731" class="blob-num js-line-number" data-line-number="731"></td>
-        <td id="LC731" class="blob-code js-file-line"><span class="pl-c">** Stack Type</span></td>
-      </tr>
-      <tr>
-        <td id="L732" class="blob-num js-line-number" data-line-number="732"></td>
-        <td id="LC732" class="blob-code js-file-line"><span class="pl-c">*/</span></td>
-      </tr>
-      <tr>
-        <td id="L733" class="blob-num js-line-number" data-line-number="733"></td>
-        <td id="LC733" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L734" class="blob-num js-line-number" data-line-number="734"></td>
-        <td id="LC734" class="blob-code js-file-line"><span class="pl-st">typedef</span> <span class="pl-st">struct</span> {</td>
-      </tr>
-      <tr>
-        <td id="L735" class="blob-num js-line-number" data-line-number="735"></td>
-        <td id="LC735" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L736" class="blob-num js-line-number" data-line-number="736"></td>
-        <td id="LC736" class="blob-code js-file-line">  <span class="pl-st">int</span> parsers_num;</td>
-      </tr>
-      <tr>
-        <td id="L737" class="blob-num js-line-number" data-line-number="737"></td>
-        <td id="LC737" class="blob-code js-file-line">  <span class="pl-st">int</span> parsers_slots;</td>
-      </tr>
-      <tr>
-        <td id="L738" class="blob-num js-line-number" data-line-number="738"></td>
-        <td id="LC738" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> **parsers;</td>
-      </tr>
-      <tr>
-        <td id="L739" class="blob-num js-line-number" data-line-number="739"></td>
-        <td id="LC739" class="blob-code js-file-line">  <span class="pl-st">int</span> *states;</td>
-      </tr>
-      <tr>
-        <td id="L740" class="blob-num js-line-number" data-line-number="740"></td>
-        <td id="LC740" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L741" class="blob-num js-line-number" data-line-number="741"></td>
-        <td id="LC741" class="blob-code js-file-line">  <span class="pl-st">int</span> results_num;</td>
-      </tr>
-      <tr>
-        <td id="L742" class="blob-num js-line-number" data-line-number="742"></td>
-        <td id="LC742" class="blob-code js-file-line">  <span class="pl-st">int</span> results_slots;</td>
-      </tr>
-      <tr>
-        <td id="L743" class="blob-num js-line-number" data-line-number="743"></td>
-        <td id="LC743" class="blob-code js-file-line">  <span class="pl-s3">mpc_result_t</span> *results;</td>
-      </tr>
-      <tr>
-        <td id="L744" class="blob-num js-line-number" data-line-number="744"></td>
-        <td id="LC744" class="blob-code js-file-line">  <span class="pl-st">int</span> *returns;</td>
-      </tr>
-      <tr>
-        <td id="L745" class="blob-num js-line-number" data-line-number="745"></td>
-        <td id="LC745" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L746" class="blob-num js-line-number" data-line-number="746"></td>
-        <td id="LC746" class="blob-code js-file-line">  <span class="pl-s3">mpc_err_t</span> *err;</td>
-      </tr>
-      <tr>
-        <td id="L747" class="blob-num js-line-number" data-line-number="747"></td>
-        <td id="LC747" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L748" class="blob-num js-line-number" data-line-number="748"></td>
-        <td id="LC748" class="blob-code js-file-line">} <span class="pl-s3">mpc_stack_t</span>;</td>
-      </tr>
-      <tr>
-        <td id="L749" class="blob-num js-line-number" data-line-number="749"></td>
-        <td id="LC749" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L750" class="blob-num js-line-number" data-line-number="750"></td>
-        <td id="LC750" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_stack_t</span> *<span class="pl-en">mpc_stack_new</span>(<span class="pl-s">const</span> <span class="pl-st">char</span> *filename) {</td>
-      </tr>
-      <tr>
-        <td id="L751" class="blob-num js-line-number" data-line-number="751"></td>
-        <td id="LC751" class="blob-code js-file-line">  <span class="pl-s3">mpc_stack_t</span> *s = <span class="pl-s3">malloc</span>(<span class="pl-k">sizeof</span>(<span class="pl-s3">mpc_stack_t</span>));</td>
-      </tr>
-      <tr>
-        <td id="L752" class="blob-num js-line-number" data-line-number="752"></td>
-        <td id="LC752" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L753" class="blob-num js-line-number" data-line-number="753"></td>
-        <td id="LC753" class="blob-code js-file-line">  s-&gt;parsers_num = <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L754" class="blob-num js-line-number" data-line-number="754"></td>
-        <td id="LC754" class="blob-code js-file-line">  s-&gt;parsers_slots = <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L755" class="blob-num js-line-number" data-line-number="755"></td>
-        <td id="LC755" class="blob-code js-file-line">  s-&gt;parsers = <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L756" class="blob-num js-line-number" data-line-number="756"></td>
-        <td id="LC756" class="blob-code js-file-line">  s-&gt;states = <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L757" class="blob-num js-line-number" data-line-number="757"></td>
-        <td id="LC757" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L758" class="blob-num js-line-number" data-line-number="758"></td>
-        <td id="LC758" class="blob-code js-file-line">  s-&gt;results_num = <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L759" class="blob-num js-line-number" data-line-number="759"></td>
-        <td id="LC759" class="blob-code js-file-line">  s-&gt;results_slots = <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L760" class="blob-num js-line-number" data-line-number="760"></td>
-        <td id="LC760" class="blob-code js-file-line">  s-&gt;results = <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L761" class="blob-num js-line-number" data-line-number="761"></td>
-        <td id="LC761" class="blob-code js-file-line">  s-&gt;returns = <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L762" class="blob-num js-line-number" data-line-number="762"></td>
-        <td id="LC762" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L763" class="blob-num js-line-number" data-line-number="763"></td>
-        <td id="LC763" class="blob-code js-file-line">  s-&gt;err = <span class="pl-s3">mpc_err_fail</span>(filename, <span class="pl-s3">mpc_state_invalid</span>(), <span class="pl-s1"><span class="pl-pds">&quot;</span>Unknown Error<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L764" class="blob-num js-line-number" data-line-number="764"></td>
-        <td id="LC764" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L765" class="blob-num js-line-number" data-line-number="765"></td>
-        <td id="LC765" class="blob-code js-file-line">  <span class="pl-k">return</span> s;</td>
-      </tr>
-      <tr>
-        <td id="L766" class="blob-num js-line-number" data-line-number="766"></td>
-        <td id="LC766" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L767" class="blob-num js-line-number" data-line-number="767"></td>
-        <td id="LC767" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L768" class="blob-num js-line-number" data-line-number="768"></td>
-        <td id="LC768" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">void</span> <span class="pl-en">mpc_stack_err</span>(<span class="pl-s3">mpc_stack_t</span> *s, <span class="pl-s3">mpc_err_t</span>* e) {</td>
-      </tr>
-      <tr>
-        <td id="L769" class="blob-num js-line-number" data-line-number="769"></td>
-        <td id="LC769" class="blob-code js-file-line">  <span class="pl-s3">mpc_err_t</span> *errs[<span class="pl-c1">2</span>];</td>
-      </tr>
-      <tr>
-        <td id="L770" class="blob-num js-line-number" data-line-number="770"></td>
-        <td id="LC770" class="blob-code js-file-line">  errs[<span class="pl-c1">0</span>] = s-&gt;err;</td>
-      </tr>
-      <tr>
-        <td id="L771" class="blob-num js-line-number" data-line-number="771"></td>
-        <td id="LC771" class="blob-code js-file-line">  errs[<span class="pl-c1">1</span>] = e;</td>
-      </tr>
-      <tr>
-        <td id="L772" class="blob-num js-line-number" data-line-number="772"></td>
-        <td id="LC772" class="blob-code js-file-line">  s-&gt;err = <span class="pl-s3">mpc_err_or</span>(errs, <span class="pl-c1">2</span>);</td>
-      </tr>
-      <tr>
-        <td id="L773" class="blob-num js-line-number" data-line-number="773"></td>
-        <td id="LC773" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L774" class="blob-num js-line-number" data-line-number="774"></td>
-        <td id="LC774" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L775" class="blob-num js-line-number" data-line-number="775"></td>
-        <td id="LC775" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">int</span> <span class="pl-en">mpc_stack_terminate</span>(<span class="pl-s3">mpc_stack_t</span> *s, <span class="pl-s3">mpc_result_t</span> *r) {</td>
-      </tr>
-      <tr>
-        <td id="L776" class="blob-num js-line-number" data-line-number="776"></td>
-        <td id="LC776" class="blob-code js-file-line">  <span class="pl-st">int</span> success = s-&gt;returns[<span class="pl-c1">0</span>];</td>
-      </tr>
-      <tr>
-        <td id="L777" class="blob-num js-line-number" data-line-number="777"></td>
-        <td id="LC777" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L778" class="blob-num js-line-number" data-line-number="778"></td>
-        <td id="LC778" class="blob-code js-file-line">  <span class="pl-k">if</span> (success) {</td>
-      </tr>
-      <tr>
-        <td id="L779" class="blob-num js-line-number" data-line-number="779"></td>
-        <td id="LC779" class="blob-code js-file-line">    r-&gt;output = s-&gt;results[<span class="pl-c1">0</span>].<span class="pl-vo">output</span>;</td>
-      </tr>
-      <tr>
-        <td id="L780" class="blob-num js-line-number" data-line-number="780"></td>
-        <td id="LC780" class="blob-code js-file-line">    <span class="pl-s3">mpc_err_delete</span>(s-&gt;err);</td>
-      </tr>
-      <tr>
-        <td id="L781" class="blob-num js-line-number" data-line-number="781"></td>
-        <td id="LC781" class="blob-code js-file-line">  } <span class="pl-k">else</span> {</td>
-      </tr>
-      <tr>
-        <td id="L782" class="blob-num js-line-number" data-line-number="782"></td>
-        <td id="LC782" class="blob-code js-file-line">    <span class="pl-s3">mpc_stack_err</span>(s, s-&gt;results[<span class="pl-c1">0</span>].<span class="pl-vo">error</span>);</td>
-      </tr>
-      <tr>
-        <td id="L783" class="blob-num js-line-number" data-line-number="783"></td>
-        <td id="LC783" class="blob-code js-file-line">    r-&gt;error = s-&gt;err;</td>
-      </tr>
-      <tr>
-        <td id="L784" class="blob-num js-line-number" data-line-number="784"></td>
-        <td id="LC784" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L785" class="blob-num js-line-number" data-line-number="785"></td>
-        <td id="LC785" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L786" class="blob-num js-line-number" data-line-number="786"></td>
-        <td id="LC786" class="blob-code js-file-line">  <span class="pl-s3">free</span>(s-&gt;parsers);</td>
-      </tr>
-      <tr>
-        <td id="L787" class="blob-num js-line-number" data-line-number="787"></td>
-        <td id="LC787" class="blob-code js-file-line">  <span class="pl-s3">free</span>(s-&gt;states);</td>
-      </tr>
-      <tr>
-        <td id="L788" class="blob-num js-line-number" data-line-number="788"></td>
-        <td id="LC788" class="blob-code js-file-line">  <span class="pl-s3">free</span>(s-&gt;results);</td>
-      </tr>
-      <tr>
-        <td id="L789" class="blob-num js-line-number" data-line-number="789"></td>
-        <td id="LC789" class="blob-code js-file-line">  <span class="pl-s3">free</span>(s-&gt;returns);</td>
-      </tr>
-      <tr>
-        <td id="L790" class="blob-num js-line-number" data-line-number="790"></td>
-        <td id="LC790" class="blob-code js-file-line">  <span class="pl-s3">free</span>(s);</td>
-      </tr>
-      <tr>
-        <td id="L791" class="blob-num js-line-number" data-line-number="791"></td>
-        <td id="LC791" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L792" class="blob-num js-line-number" data-line-number="792"></td>
-        <td id="LC792" class="blob-code js-file-line">  <span class="pl-k">return</span> success;</td>
-      </tr>
-      <tr>
-        <td id="L793" class="blob-num js-line-number" data-line-number="793"></td>
-        <td id="LC793" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L794" class="blob-num js-line-number" data-line-number="794"></td>
-        <td id="LC794" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L795" class="blob-num js-line-number" data-line-number="795"></td>
-        <td id="LC795" class="blob-code js-file-line"><span class="pl-c">/* Stack Parser Stuff */</span></td>
-      </tr>
-      <tr>
-        <td id="L796" class="blob-num js-line-number" data-line-number="796"></td>
-        <td id="LC796" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L797" class="blob-num js-line-number" data-line-number="797"></td>
-        <td id="LC797" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">void</span> <span class="pl-en">mpc_stack_set_state</span>(<span class="pl-s3">mpc_stack_t</span> *s, <span class="pl-st">int</span> x) {</td>
-      </tr>
-      <tr>
-        <td id="L798" class="blob-num js-line-number" data-line-number="798"></td>
-        <td id="LC798" class="blob-code js-file-line">  s-&gt;states[s-&gt;parsers_num-<span class="pl-c1">1</span>] = x;</td>
-      </tr>
-      <tr>
-        <td id="L799" class="blob-num js-line-number" data-line-number="799"></td>
-        <td id="LC799" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L800" class="blob-num js-line-number" data-line-number="800"></td>
-        <td id="LC800" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L801" class="blob-num js-line-number" data-line-number="801"></td>
-        <td id="LC801" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">void</span> <span class="pl-en">mpc_stack_parsers_reserve_more</span>(<span class="pl-s3">mpc_stack_t</span> *s) {</td>
-      </tr>
-      <tr>
-        <td id="L802" class="blob-num js-line-number" data-line-number="802"></td>
-        <td id="LC802" class="blob-code js-file-line">  <span class="pl-k">if</span> (s-&gt;parsers_num &gt; s-&gt;parsers_slots) {</td>
-      </tr>
-      <tr>
-        <td id="L803" class="blob-num js-line-number" data-line-number="803"></td>
-        <td id="LC803" class="blob-code js-file-line">    s-&gt;parsers_slots = <span class="pl-s3">ceil</span>((s-&gt;parsers_slots+<span class="pl-c1">1</span>) * <span class="pl-c1">1.5</span>);</td>
-      </tr>
-      <tr>
-        <td id="L804" class="blob-num js-line-number" data-line-number="804"></td>
-        <td id="LC804" class="blob-code js-file-line">    s-&gt;parsers = <span class="pl-s3">realloc</span>(s-&gt;parsers, <span class="pl-k">sizeof</span>(<span class="pl-s3">mpc_parser_t</span>*) * s-&gt;parsers_slots);</td>
-      </tr>
-      <tr>
-        <td id="L805" class="blob-num js-line-number" data-line-number="805"></td>
-        <td id="LC805" class="blob-code js-file-line">    s-&gt;states = <span class="pl-s3">realloc</span>(s-&gt;states, <span class="pl-k">sizeof</span>(<span class="pl-st">int</span>) * s-&gt;parsers_slots);</td>
-      </tr>
-      <tr>
-        <td id="L806" class="blob-num js-line-number" data-line-number="806"></td>
-        <td id="LC806" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L807" class="blob-num js-line-number" data-line-number="807"></td>
-        <td id="LC807" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L808" class="blob-num js-line-number" data-line-number="808"></td>
-        <td id="LC808" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L809" class="blob-num js-line-number" data-line-number="809"></td>
-        <td id="LC809" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">void</span> <span class="pl-en">mpc_stack_parsers_reserve_less</span>(<span class="pl-s3">mpc_stack_t</span> *s) {</td>
-      </tr>
-      <tr>
-        <td id="L810" class="blob-num js-line-number" data-line-number="810"></td>
-        <td id="LC810" class="blob-code js-file-line">  <span class="pl-k">if</span> (s-&gt;parsers_slots &gt; <span class="pl-s3">pow</span>(s-&gt;parsers_num+<span class="pl-c1">1</span>, <span class="pl-c1">1.5</span>)) {</td>
-      </tr>
-      <tr>
-        <td id="L811" class="blob-num js-line-number" data-line-number="811"></td>
-        <td id="LC811" class="blob-code js-file-line">    s-&gt;parsers_slots = <span class="pl-s3">floor</span>((s-&gt;parsers_slots-<span class="pl-c1">1</span>) * (<span class="pl-c1">1.0</span>/<span class="pl-c1">1.5</span>));</td>
-      </tr>
-      <tr>
-        <td id="L812" class="blob-num js-line-number" data-line-number="812"></td>
-        <td id="LC812" class="blob-code js-file-line">    s-&gt;parsers = <span class="pl-s3">realloc</span>(s-&gt;parsers, <span class="pl-k">sizeof</span>(<span class="pl-s3">mpc_parser_t</span>*) * s-&gt;parsers_slots);</td>
-      </tr>
-      <tr>
-        <td id="L813" class="blob-num js-line-number" data-line-number="813"></td>
-        <td id="LC813" class="blob-code js-file-line">    s-&gt;states = <span class="pl-s3">realloc</span>(s-&gt;states, <span class="pl-k">sizeof</span>(<span class="pl-st">int</span>) * s-&gt;parsers_slots);</td>
-      </tr>
-      <tr>
-        <td id="L814" class="blob-num js-line-number" data-line-number="814"></td>
-        <td id="LC814" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L815" class="blob-num js-line-number" data-line-number="815"></td>
-        <td id="LC815" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L816" class="blob-num js-line-number" data-line-number="816"></td>
-        <td id="LC816" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L817" class="blob-num js-line-number" data-line-number="817"></td>
-        <td id="LC817" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">void</span> <span class="pl-en">mpc_stack_pushp</span>(<span class="pl-s3">mpc_stack_t</span> *s, <span class="pl-s3">mpc_parser_t</span> *p) {</td>
-      </tr>
-      <tr>
-        <td id="L818" class="blob-num js-line-number" data-line-number="818"></td>
-        <td id="LC818" class="blob-code js-file-line">  s-&gt;parsers_num++;</td>
-      </tr>
-      <tr>
-        <td id="L819" class="blob-num js-line-number" data-line-number="819"></td>
-        <td id="LC819" class="blob-code js-file-line">  <span class="pl-s3">mpc_stack_parsers_reserve_more</span>(s);</td>
-      </tr>
-      <tr>
-        <td id="L820" class="blob-num js-line-number" data-line-number="820"></td>
-        <td id="LC820" class="blob-code js-file-line">  s-&gt;parsers[s-&gt;parsers_num-<span class="pl-c1">1</span>] = p;</td>
-      </tr>
-      <tr>
-        <td id="L821" class="blob-num js-line-number" data-line-number="821"></td>
-        <td id="LC821" class="blob-code js-file-line">  s-&gt;states[s-&gt;parsers_num-<span class="pl-c1">1</span>] = <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L822" class="blob-num js-line-number" data-line-number="822"></td>
-        <td id="LC822" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L823" class="blob-num js-line-number" data-line-number="823"></td>
-        <td id="LC823" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L824" class="blob-num js-line-number" data-line-number="824"></td>
-        <td id="LC824" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">void</span> <span class="pl-en">mpc_stack_popp</span>(<span class="pl-s3">mpc_stack_t</span> *s, <span class="pl-s3">mpc_parser_t</span> **p, <span class="pl-st">int</span> *st) {</td>
-      </tr>
-      <tr>
-        <td id="L825" class="blob-num js-line-number" data-line-number="825"></td>
-        <td id="LC825" class="blob-code js-file-line">  *p = s-&gt;parsers[s-&gt;parsers_num-<span class="pl-c1">1</span>];</td>
-      </tr>
-      <tr>
-        <td id="L826" class="blob-num js-line-number" data-line-number="826"></td>
-        <td id="LC826" class="blob-code js-file-line">  *st = s-&gt;states[s-&gt;parsers_num-<span class="pl-c1">1</span>];</td>
-      </tr>
-      <tr>
-        <td id="L827" class="blob-num js-line-number" data-line-number="827"></td>
-        <td id="LC827" class="blob-code js-file-line">  s-&gt;parsers_num--;</td>
-      </tr>
-      <tr>
-        <td id="L828" class="blob-num js-line-number" data-line-number="828"></td>
-        <td id="LC828" class="blob-code js-file-line">  <span class="pl-s3">mpc_stack_parsers_reserve_less</span>(s);</td>
-      </tr>
-      <tr>
-        <td id="L829" class="blob-num js-line-number" data-line-number="829"></td>
-        <td id="LC829" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L830" class="blob-num js-line-number" data-line-number="830"></td>
-        <td id="LC830" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L831" class="blob-num js-line-number" data-line-number="831"></td>
-        <td id="LC831" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">void</span> <span class="pl-en">mpc_stack_peepp</span>(<span class="pl-s3">mpc_stack_t</span> *s, <span class="pl-s3">mpc_parser_t</span> **p, <span class="pl-st">int</span> *st) {</td>
-      </tr>
-      <tr>
-        <td id="L832" class="blob-num js-line-number" data-line-number="832"></td>
-        <td id="LC832" class="blob-code js-file-line">  *p = s-&gt;parsers[s-&gt;parsers_num-<span class="pl-c1">1</span>];</td>
-      </tr>
-      <tr>
-        <td id="L833" class="blob-num js-line-number" data-line-number="833"></td>
-        <td id="LC833" class="blob-code js-file-line">  *st = s-&gt;states[s-&gt;parsers_num-<span class="pl-c1">1</span>];</td>
-      </tr>
-      <tr>
-        <td id="L834" class="blob-num js-line-number" data-line-number="834"></td>
-        <td id="LC834" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L835" class="blob-num js-line-number" data-line-number="835"></td>
-        <td id="LC835" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L836" class="blob-num js-line-number" data-line-number="836"></td>
-        <td id="LC836" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">int</span> <span class="pl-en">mpc_stack_empty</span>(<span class="pl-s3">mpc_stack_t</span> *s) {</td>
-      </tr>
-      <tr>
-        <td id="L837" class="blob-num js-line-number" data-line-number="837"></td>
-        <td id="LC837" class="blob-code js-file-line">  <span class="pl-k">return</span> s-&gt;parsers_num == <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L838" class="blob-num js-line-number" data-line-number="838"></td>
-        <td id="LC838" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L839" class="blob-num js-line-number" data-line-number="839"></td>
-        <td id="LC839" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L840" class="blob-num js-line-number" data-line-number="840"></td>
-        <td id="LC840" class="blob-code js-file-line"><span class="pl-c">/* Stack Result Stuff */</span></td>
-      </tr>
-      <tr>
-        <td id="L841" class="blob-num js-line-number" data-line-number="841"></td>
-        <td id="LC841" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L842" class="blob-num js-line-number" data-line-number="842"></td>
-        <td id="LC842" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_result_t</span> <span class="pl-en">mpc_result_err</span>(<span class="pl-s3">mpc_err_t</span> *e) {</td>
-      </tr>
-      <tr>
-        <td id="L843" class="blob-num js-line-number" data-line-number="843"></td>
-        <td id="LC843" class="blob-code js-file-line">  <span class="pl-s3">mpc_result_t</span> r;</td>
-      </tr>
-      <tr>
-        <td id="L844" class="blob-num js-line-number" data-line-number="844"></td>
-        <td id="LC844" class="blob-code js-file-line">  r.<span class="pl-vo">error</span> = e;</td>
-      </tr>
-      <tr>
-        <td id="L845" class="blob-num js-line-number" data-line-number="845"></td>
-        <td id="LC845" class="blob-code js-file-line">  <span class="pl-k">return</span> r;</td>
-      </tr>
-      <tr>
-        <td id="L846" class="blob-num js-line-number" data-line-number="846"></td>
-        <td id="LC846" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L847" class="blob-num js-line-number" data-line-number="847"></td>
-        <td id="LC847" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L848" class="blob-num js-line-number" data-line-number="848"></td>
-        <td id="LC848" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_result_t</span> <span class="pl-en">mpc_result_out</span>(<span class="pl-s3">mpc_val_t</span> *x) {</td>
-      </tr>
-      <tr>
-        <td id="L849" class="blob-num js-line-number" data-line-number="849"></td>
-        <td id="LC849" class="blob-code js-file-line">  <span class="pl-s3">mpc_result_t</span> r;</td>
-      </tr>
-      <tr>
-        <td id="L850" class="blob-num js-line-number" data-line-number="850"></td>
-        <td id="LC850" class="blob-code js-file-line">  r.<span class="pl-vo">output</span> = x;</td>
-      </tr>
-      <tr>
-        <td id="L851" class="blob-num js-line-number" data-line-number="851"></td>
-        <td id="LC851" class="blob-code js-file-line">  <span class="pl-k">return</span> r;</td>
-      </tr>
-      <tr>
-        <td id="L852" class="blob-num js-line-number" data-line-number="852"></td>
-        <td id="LC852" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L853" class="blob-num js-line-number" data-line-number="853"></td>
-        <td id="LC853" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L854" class="blob-num js-line-number" data-line-number="854"></td>
-        <td id="LC854" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">void</span> <span class="pl-en">mpc_stack_results_reserve_more</span>(<span class="pl-s3">mpc_stack_t</span> *s) {</td>
-      </tr>
-      <tr>
-        <td id="L855" class="blob-num js-line-number" data-line-number="855"></td>
-        <td id="LC855" class="blob-code js-file-line">  <span class="pl-k">if</span> (s-&gt;results_num &gt; s-&gt;results_slots) {</td>
-      </tr>
-      <tr>
-        <td id="L856" class="blob-num js-line-number" data-line-number="856"></td>
-        <td id="LC856" class="blob-code js-file-line">    s-&gt;results_slots = <span class="pl-s3">ceil</span>((s-&gt;results_slots + <span class="pl-c1">1</span>) * <span class="pl-c1">1.5</span>);</td>
-      </tr>
-      <tr>
-        <td id="L857" class="blob-num js-line-number" data-line-number="857"></td>
-        <td id="LC857" class="blob-code js-file-line">    s-&gt;results = <span class="pl-s3">realloc</span>(s-&gt;results, <span class="pl-k">sizeof</span>(<span class="pl-s3">mpc_result_t</span>) * s-&gt;results_slots);</td>
-      </tr>
-      <tr>
-        <td id="L858" class="blob-num js-line-number" data-line-number="858"></td>
-        <td id="LC858" class="blob-code js-file-line">    s-&gt;returns = <span class="pl-s3">realloc</span>(s-&gt;returns, <span class="pl-k">sizeof</span>(<span class="pl-st">int</span>) * s-&gt;results_slots);</td>
-      </tr>
-      <tr>
-        <td id="L859" class="blob-num js-line-number" data-line-number="859"></td>
-        <td id="LC859" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L860" class="blob-num js-line-number" data-line-number="860"></td>
-        <td id="LC860" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L861" class="blob-num js-line-number" data-line-number="861"></td>
-        <td id="LC861" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L862" class="blob-num js-line-number" data-line-number="862"></td>
-        <td id="LC862" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">void</span> <span class="pl-en">mpc_stack_results_reserve_less</span>(<span class="pl-s3">mpc_stack_t</span> *s) {</td>
-      </tr>
-      <tr>
-        <td id="L863" class="blob-num js-line-number" data-line-number="863"></td>
-        <td id="LC863" class="blob-code js-file-line">  <span class="pl-k">if</span> ( s-&gt;results_slots &gt; <span class="pl-s3">pow</span>(s-&gt;results_num+<span class="pl-c1">1</span>, <span class="pl-c1">1.5</span>)) {</td>
-      </tr>
-      <tr>
-        <td id="L864" class="blob-num js-line-number" data-line-number="864"></td>
-        <td id="LC864" class="blob-code js-file-line">    s-&gt;results_slots = <span class="pl-s3">floor</span>((s-&gt;results_slots-<span class="pl-c1">1</span>) * (<span class="pl-c1">1.0</span>/<span class="pl-c1">1.5</span>));</td>
-      </tr>
-      <tr>
-        <td id="L865" class="blob-num js-line-number" data-line-number="865"></td>
-        <td id="LC865" class="blob-code js-file-line">    s-&gt;results = <span class="pl-s3">realloc</span>(s-&gt;results, <span class="pl-k">sizeof</span>(<span class="pl-s3">mpc_result_t</span>) * s-&gt;results_slots);</td>
-      </tr>
-      <tr>
-        <td id="L866" class="blob-num js-line-number" data-line-number="866"></td>
-        <td id="LC866" class="blob-code js-file-line">    s-&gt;returns = <span class="pl-s3">realloc</span>(s-&gt;returns, <span class="pl-k">sizeof</span>(<span class="pl-st">int</span>) * s-&gt;results_slots);</td>
-      </tr>
-      <tr>
-        <td id="L867" class="blob-num js-line-number" data-line-number="867"></td>
-        <td id="LC867" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L868" class="blob-num js-line-number" data-line-number="868"></td>
-        <td id="LC868" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L869" class="blob-num js-line-number" data-line-number="869"></td>
-        <td id="LC869" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L870" class="blob-num js-line-number" data-line-number="870"></td>
-        <td id="LC870" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">void</span> <span class="pl-en">mpc_stack_pushr</span>(<span class="pl-s3">mpc_stack_t</span> *s, <span class="pl-s3">mpc_result_t</span> x, <span class="pl-st">int</span> r) {</td>
-      </tr>
-      <tr>
-        <td id="L871" class="blob-num js-line-number" data-line-number="871"></td>
-        <td id="LC871" class="blob-code js-file-line">  s-&gt;results_num++;</td>
-      </tr>
-      <tr>
-        <td id="L872" class="blob-num js-line-number" data-line-number="872"></td>
-        <td id="LC872" class="blob-code js-file-line">  <span class="pl-s3">mpc_stack_results_reserve_more</span>(s);</td>
-      </tr>
-      <tr>
-        <td id="L873" class="blob-num js-line-number" data-line-number="873"></td>
-        <td id="LC873" class="blob-code js-file-line">  s-&gt;results[s-&gt;results_num-<span class="pl-c1">1</span>] = x;</td>
-      </tr>
-      <tr>
-        <td id="L874" class="blob-num js-line-number" data-line-number="874"></td>
-        <td id="LC874" class="blob-code js-file-line">  s-&gt;returns[s-&gt;results_num-<span class="pl-c1">1</span>] = r;</td>
-      </tr>
-      <tr>
-        <td id="L875" class="blob-num js-line-number" data-line-number="875"></td>
-        <td id="LC875" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L876" class="blob-num js-line-number" data-line-number="876"></td>
-        <td id="LC876" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L877" class="blob-num js-line-number" data-line-number="877"></td>
-        <td id="LC877" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">int</span> <span class="pl-en">mpc_stack_popr</span>(<span class="pl-s3">mpc_stack_t</span> *s, <span class="pl-s3">mpc_result_t</span> *x) {</td>
-      </tr>
-      <tr>
-        <td id="L878" class="blob-num js-line-number" data-line-number="878"></td>
-        <td id="LC878" class="blob-code js-file-line">  <span class="pl-st">int</span> r;</td>
-      </tr>
-      <tr>
-        <td id="L879" class="blob-num js-line-number" data-line-number="879"></td>
-        <td id="LC879" class="blob-code js-file-line">  *x = s-&gt;results[s-&gt;results_num-<span class="pl-c1">1</span>];</td>
-      </tr>
-      <tr>
-        <td id="L880" class="blob-num js-line-number" data-line-number="880"></td>
-        <td id="LC880" class="blob-code js-file-line">  r = s-&gt;returns[s-&gt;results_num-<span class="pl-c1">1</span>];</td>
-      </tr>
-      <tr>
-        <td id="L881" class="blob-num js-line-number" data-line-number="881"></td>
-        <td id="LC881" class="blob-code js-file-line">  s-&gt;results_num--;</td>
-      </tr>
-      <tr>
-        <td id="L882" class="blob-num js-line-number" data-line-number="882"></td>
-        <td id="LC882" class="blob-code js-file-line">  <span class="pl-s3">mpc_stack_results_reserve_less</span>(s);</td>
-      </tr>
-      <tr>
-        <td id="L883" class="blob-num js-line-number" data-line-number="883"></td>
-        <td id="LC883" class="blob-code js-file-line">  <span class="pl-k">return</span> r;</td>
-      </tr>
-      <tr>
-        <td id="L884" class="blob-num js-line-number" data-line-number="884"></td>
-        <td id="LC884" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L885" class="blob-num js-line-number" data-line-number="885"></td>
-        <td id="LC885" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L886" class="blob-num js-line-number" data-line-number="886"></td>
-        <td id="LC886" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">int</span> <span class="pl-en">mpc_stack_peekr</span>(<span class="pl-s3">mpc_stack_t</span> *s, <span class="pl-s3">mpc_result_t</span> *x) {</td>
-      </tr>
-      <tr>
-        <td id="L887" class="blob-num js-line-number" data-line-number="887"></td>
-        <td id="LC887" class="blob-code js-file-line">  *x = s-&gt;results[s-&gt;results_num-<span class="pl-c1">1</span>];</td>
-      </tr>
-      <tr>
-        <td id="L888" class="blob-num js-line-number" data-line-number="888"></td>
-        <td id="LC888" class="blob-code js-file-line">  <span class="pl-k">return</span> s-&gt;returns[s-&gt;results_num-<span class="pl-c1">1</span>];</td>
-      </tr>
-      <tr>
-        <td id="L889" class="blob-num js-line-number" data-line-number="889"></td>
-        <td id="LC889" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L890" class="blob-num js-line-number" data-line-number="890"></td>
-        <td id="LC890" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L891" class="blob-num js-line-number" data-line-number="891"></td>
-        <td id="LC891" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">void</span> <span class="pl-en">mpc_stack_popr_err</span>(<span class="pl-s3">mpc_stack_t</span> *s, <span class="pl-st">int</span> n) {</td>
-      </tr>
-      <tr>
-        <td id="L892" class="blob-num js-line-number" data-line-number="892"></td>
-        <td id="LC892" class="blob-code js-file-line">  <span class="pl-s3">mpc_result_t</span> x;</td>
-      </tr>
-      <tr>
-        <td id="L893" class="blob-num js-line-number" data-line-number="893"></td>
-        <td id="LC893" class="blob-code js-file-line">  <span class="pl-k">while</span> (n) {</td>
-      </tr>
-      <tr>
-        <td id="L894" class="blob-num js-line-number" data-line-number="894"></td>
-        <td id="LC894" class="blob-code js-file-line">    <span class="pl-s3">mpc_stack_popr</span>(s, &amp;x);</td>
-      </tr>
-      <tr>
-        <td id="L895" class="blob-num js-line-number" data-line-number="895"></td>
-        <td id="LC895" class="blob-code js-file-line">    <span class="pl-s3">mpc_stack_err</span>(s, x.<span class="pl-vo">error</span>);</td>
-      </tr>
-      <tr>
-        <td id="L896" class="blob-num js-line-number" data-line-number="896"></td>
-        <td id="LC896" class="blob-code js-file-line">    n--;</td>
-      </tr>
-      <tr>
-        <td id="L897" class="blob-num js-line-number" data-line-number="897"></td>
-        <td id="LC897" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L898" class="blob-num js-line-number" data-line-number="898"></td>
-        <td id="LC898" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L899" class="blob-num js-line-number" data-line-number="899"></td>
-        <td id="LC899" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L900" class="blob-num js-line-number" data-line-number="900"></td>
-        <td id="LC900" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">void</span> <span class="pl-en">mpc_stack_popr_out</span>(<span class="pl-s3">mpc_stack_t</span> *s, <span class="pl-st">int</span> n, <span class="pl-s3">mpc_dtor_t</span> *ds) {</td>
-      </tr>
-      <tr>
-        <td id="L901" class="blob-num js-line-number" data-line-number="901"></td>
-        <td id="LC901" class="blob-code js-file-line">  <span class="pl-s3">mpc_result_t</span> x;</td>
-      </tr>
-      <tr>
-        <td id="L902" class="blob-num js-line-number" data-line-number="902"></td>
-        <td id="LC902" class="blob-code js-file-line">  <span class="pl-k">while</span> (n) {</td>
-      </tr>
-      <tr>
-        <td id="L903" class="blob-num js-line-number" data-line-number="903"></td>
-        <td id="LC903" class="blob-code js-file-line">    <span class="pl-s3">mpc_stack_popr</span>(s, &amp;x);</td>
-      </tr>
-      <tr>
-        <td id="L904" class="blob-num js-line-number" data-line-number="904"></td>
-        <td id="LC904" class="blob-code js-file-line">    ds[n-<span class="pl-c1">1</span>](x.<span class="pl-vo">output</span>);</td>
-      </tr>
-      <tr>
-        <td id="L905" class="blob-num js-line-number" data-line-number="905"></td>
-        <td id="LC905" class="blob-code js-file-line">    n--;</td>
-      </tr>
-      <tr>
-        <td id="L906" class="blob-num js-line-number" data-line-number="906"></td>
-        <td id="LC906" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L907" class="blob-num js-line-number" data-line-number="907"></td>
-        <td id="LC907" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L908" class="blob-num js-line-number" data-line-number="908"></td>
-        <td id="LC908" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L909" class="blob-num js-line-number" data-line-number="909"></td>
-        <td id="LC909" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">void</span> <span class="pl-en">mpc_stack_popr_out_single</span>(<span class="pl-s3">mpc_stack_t</span> *s, <span class="pl-st">int</span> n, <span class="pl-s3">mpc_dtor_t</span> dx) {</td>
-      </tr>
-      <tr>
-        <td id="L910" class="blob-num js-line-number" data-line-number="910"></td>
-        <td id="LC910" class="blob-code js-file-line">  <span class="pl-s3">mpc_result_t</span> x;</td>
-      </tr>
-      <tr>
-        <td id="L911" class="blob-num js-line-number" data-line-number="911"></td>
-        <td id="LC911" class="blob-code js-file-line">  <span class="pl-k">while</span> (n) {</td>
-      </tr>
-      <tr>
-        <td id="L912" class="blob-num js-line-number" data-line-number="912"></td>
-        <td id="LC912" class="blob-code js-file-line">    <span class="pl-s3">mpc_stack_popr</span>(s, &amp;x);</td>
-      </tr>
-      <tr>
-        <td id="L913" class="blob-num js-line-number" data-line-number="913"></td>
-        <td id="LC913" class="blob-code js-file-line">    <span class="pl-s3">dx</span>(x.<span class="pl-vo">output</span>);</td>
-      </tr>
-      <tr>
-        <td id="L914" class="blob-num js-line-number" data-line-number="914"></td>
-        <td id="LC914" class="blob-code js-file-line">    n--;</td>
-      </tr>
-      <tr>
-        <td id="L915" class="blob-num js-line-number" data-line-number="915"></td>
-        <td id="LC915" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L916" class="blob-num js-line-number" data-line-number="916"></td>
-        <td id="LC916" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L917" class="blob-num js-line-number" data-line-number="917"></td>
-        <td id="LC917" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L918" class="blob-num js-line-number" data-line-number="918"></td>
-        <td id="LC918" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">void</span> <span class="pl-en">mpc_stack_popr_n</span>(<span class="pl-s3">mpc_stack_t</span> *s, <span class="pl-st">int</span> n) {</td>
-      </tr>
-      <tr>
-        <td id="L919" class="blob-num js-line-number" data-line-number="919"></td>
-        <td id="LC919" class="blob-code js-file-line">  <span class="pl-s3">mpc_result_t</span> x;</td>
-      </tr>
-      <tr>
-        <td id="L920" class="blob-num js-line-number" data-line-number="920"></td>
-        <td id="LC920" class="blob-code js-file-line">  <span class="pl-k">while</span> (n) {</td>
-      </tr>
-      <tr>
-        <td id="L921" class="blob-num js-line-number" data-line-number="921"></td>
-        <td id="LC921" class="blob-code js-file-line">    <span class="pl-s3">mpc_stack_popr</span>(s, &amp;x);</td>
-      </tr>
-      <tr>
-        <td id="L922" class="blob-num js-line-number" data-line-number="922"></td>
-        <td id="LC922" class="blob-code js-file-line">    n--;</td>
-      </tr>
-      <tr>
-        <td id="L923" class="blob-num js-line-number" data-line-number="923"></td>
-        <td id="LC923" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L924" class="blob-num js-line-number" data-line-number="924"></td>
-        <td id="LC924" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L925" class="blob-num js-line-number" data-line-number="925"></td>
-        <td id="LC925" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L926" class="blob-num js-line-number" data-line-number="926"></td>
-        <td id="LC926" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpc_stack_merger_out</span>(<span class="pl-s3">mpc_stack_t</span> *s, <span class="pl-st">int</span> n, <span class="pl-s3">mpc_fold_t</span> f) {</td>
-      </tr>
-      <tr>
-        <td id="L927" class="blob-num js-line-number" data-line-number="927"></td>
-        <td id="LC927" class="blob-code js-file-line">  <span class="pl-s3">mpc_val_t</span> *x = <span class="pl-s3">f</span>(n, (<span class="pl-s3">mpc_val_t</span>**)(&amp;s-&gt;results[s-&gt;results_num-n]));</td>
-      </tr>
-      <tr>
-        <td id="L928" class="blob-num js-line-number" data-line-number="928"></td>
-        <td id="LC928" class="blob-code js-file-line">  <span class="pl-s3">mpc_stack_popr_n</span>(s, n);</td>
-      </tr>
-      <tr>
-        <td id="L929" class="blob-num js-line-number" data-line-number="929"></td>
-        <td id="LC929" class="blob-code js-file-line">  <span class="pl-k">return</span> x;</td>
-      </tr>
-      <tr>
-        <td id="L930" class="blob-num js-line-number" data-line-number="930"></td>
-        <td id="LC930" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L931" class="blob-num js-line-number" data-line-number="931"></td>
-        <td id="LC931" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L932" class="blob-num js-line-number" data-line-number="932"></td>
-        <td id="LC932" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_err_t</span> *<span class="pl-en">mpc_stack_merger_err</span>(<span class="pl-s3">mpc_stack_t</span> *s, <span class="pl-st">int</span> n) {</td>
-      </tr>
-      <tr>
-        <td id="L933" class="blob-num js-line-number" data-line-number="933"></td>
-        <td id="LC933" class="blob-code js-file-line">  <span class="pl-s3">mpc_err_t</span> *x = <span class="pl-s3">mpc_err_or</span>((<span class="pl-s3">mpc_err_t</span>**)(&amp;s-&gt;results[s-&gt;results_num-n]), n);</td>
-      </tr>
-      <tr>
-        <td id="L934" class="blob-num js-line-number" data-line-number="934"></td>
-        <td id="LC934" class="blob-code js-file-line">  <span class="pl-s3">mpc_stack_popr_n</span>(s, n);</td>
-      </tr>
-      <tr>
-        <td id="L935" class="blob-num js-line-number" data-line-number="935"></td>
-        <td id="LC935" class="blob-code js-file-line">  <span class="pl-k">return</span> x;</td>
-      </tr>
-      <tr>
-        <td id="L936" class="blob-num js-line-number" data-line-number="936"></td>
-        <td id="LC936" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L937" class="blob-num js-line-number" data-line-number="937"></td>
-        <td id="LC937" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L938" class="blob-num js-line-number" data-line-number="938"></td>
-        <td id="LC938" class="blob-code js-file-line"><span class="pl-c">/*</span></td>
-      </tr>
-      <tr>
-        <td id="L939" class="blob-num js-line-number" data-line-number="939"></td>
-        <td id="LC939" class="blob-code js-file-line"><span class="pl-c">** This is rather pleasant. The core parsing routine</span></td>
-      </tr>
-      <tr>
-        <td id="L940" class="blob-num js-line-number" data-line-number="940"></td>
-        <td id="LC940" class="blob-code js-file-line"><span class="pl-c">** is written in about 200 lines of C.</span></td>
-      </tr>
-      <tr>
-        <td id="L941" class="blob-num js-line-number" data-line-number="941"></td>
-        <td id="LC941" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L942" class="blob-num js-line-number" data-line-number="942"></td>
-        <td id="LC942" class="blob-code js-file-line"><span class="pl-c">** I also love the way in which each parsing type</span></td>
-      </tr>
-      <tr>
-        <td id="L943" class="blob-num js-line-number" data-line-number="943"></td>
-        <td id="LC943" class="blob-code js-file-line"><span class="pl-c">** concisely matches some construct or pattern.</span></td>
-      </tr>
-      <tr>
-        <td id="L944" class="blob-num js-line-number" data-line-number="944"></td>
-        <td id="LC944" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L945" class="blob-num js-line-number" data-line-number="945"></td>
-        <td id="LC945" class="blob-code js-file-line"><span class="pl-c">** Particularly nice are the `or` and `and`</span></td>
-      </tr>
-      <tr>
-        <td id="L946" class="blob-num js-line-number" data-line-number="946"></td>
-        <td id="LC946" class="blob-code js-file-line"><span class="pl-c">** types which have a broken but mirrored structure</span></td>
-      </tr>
-      <tr>
-        <td id="L947" class="blob-num js-line-number" data-line-number="947"></td>
-        <td id="LC947" class="blob-code js-file-line"><span class="pl-c">** with return value and error reflected.</span></td>
-      </tr>
-      <tr>
-        <td id="L948" class="blob-num js-line-number" data-line-number="948"></td>
-        <td id="LC948" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L949" class="blob-num js-line-number" data-line-number="949"></td>
-        <td id="LC949" class="blob-code js-file-line"><span class="pl-c">** When this function was written in recursive form</span></td>
-      </tr>
-      <tr>
-        <td id="L950" class="blob-num js-line-number" data-line-number="950"></td>
-        <td id="LC950" class="blob-code js-file-line"><span class="pl-c">** it looked pretty nice. But I&#39;ve since switched</span></td>
-      </tr>
-      <tr>
-        <td id="L951" class="blob-num js-line-number" data-line-number="951"></td>
-        <td id="LC951" class="blob-code js-file-line"><span class="pl-c">** it around to an awkward while loop. It was an</span></td>
-      </tr>
-      <tr>
-        <td id="L952" class="blob-num js-line-number" data-line-number="952"></td>
-        <td id="LC952" class="blob-code js-file-line"><span class="pl-c">** unfortunate change for code simplicity but it</span></td>
-      </tr>
-      <tr>
-        <td id="L953" class="blob-num js-line-number" data-line-number="953"></td>
-        <td id="LC953" class="blob-code js-file-line"><span class="pl-c">** is noble in the name of performance (and </span></td>
-      </tr>
-      <tr>
-        <td id="L954" class="blob-num js-line-number" data-line-number="954"></td>
-        <td id="LC954" class="blob-code js-file-line"><span class="pl-c">** not smashing the stack).</span></td>
-      </tr>
-      <tr>
-        <td id="L955" class="blob-num js-line-number" data-line-number="955"></td>
-        <td id="LC955" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L956" class="blob-num js-line-number" data-line-number="956"></td>
-        <td id="LC956" class="blob-code js-file-line"><span class="pl-c">** But it is now a pretty ugly beast...</span></td>
-      </tr>
-      <tr>
-        <td id="L957" class="blob-num js-line-number" data-line-number="957"></td>
-        <td id="LC957" class="blob-code js-file-line"><span class="pl-c">*/</span></td>
-      </tr>
-      <tr>
-        <td id="L958" class="blob-num js-line-number" data-line-number="958"></td>
-        <td id="LC958" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L959" class="blob-num js-line-number" data-line-number="959"></td>
-        <td id="LC959" class="blob-code js-file-line">#<span class="pl-k">define</span> <span class="pl-en">MPC_CONTINUE</span>(<span class="pl-v">st, x</span>) mpc_stack_set_state(stk, st); mpc_stack_pushp(stk, x); <span class="pl-k">continue</span></td>
-      </tr>
-      <tr>
-        <td id="L960" class="blob-num js-line-number" data-line-number="960"></td>
-        <td id="LC960" class="blob-code js-file-line">#<span class="pl-k">define</span> <span class="pl-en">MPC_SUCCESS</span>(<span class="pl-v">x</span>) mpc_stack_popp(stk, &amp;p, &amp;st); mpc_stack_pushr(stk, mpc_result_out(x), <span class="pl-c1">1</span>); <span class="pl-k">continue</span></td>
-      </tr>
-      <tr>
-        <td id="L961" class="blob-num js-line-number" data-line-number="961"></td>
-        <td id="LC961" class="blob-code js-file-line">#<span class="pl-k">define</span> <span class="pl-en">MPC_FAILURE</span>(<span class="pl-v">x</span>) mpc_stack_popp(stk, &amp;p, &amp;st); mpc_stack_pushr(stk, mpc_result_err(x), <span class="pl-c1">0</span>); <span class="pl-k">continue</span></td>
-      </tr>
-      <tr>
-        <td id="L962" class="blob-num js-line-number" data-line-number="962"></td>
-        <td id="LC962" class="blob-code js-file-line">#<span class="pl-k">define</span> <span class="pl-en">MPC_PRIMATIVE</span>(<span class="pl-v">x, f</span>) <span class="pl-k">if</span> (f) { <span class="pl-s3">MPC_SUCCESS</span>(x); } <span class="pl-k">else</span> { <span class="pl-s3">MPC_FAILURE</span>(<span class="pl-s3">mpc_err_fail</span>(i-&gt;filename, i-&gt;state, <span class="pl-s1"><span class="pl-pds">&quot;</span>Incorrect Input<span class="pl-pds">&quot;</span></span>)); }</td>
-      </tr>
-      <tr>
-        <td id="L963" class="blob-num js-line-number" data-line-number="963"></td>
-        <td id="LC963" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L964" class="blob-num js-line-number" data-line-number="964"></td>
-        <td id="LC964" class="blob-code js-file-line"><span class="pl-st">int</span> <span class="pl-en">mpc_parse_input</span>(<span class="pl-s3">mpc_input_t</span> *i, <span class="pl-s3">mpc_parser_t</span> *init, <span class="pl-s3">mpc_result_t</span> *final) {</td>
-      </tr>
-      <tr>
-        <td id="L965" class="blob-num js-line-number" data-line-number="965"></td>
-        <td id="LC965" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L966" class="blob-num js-line-number" data-line-number="966"></td>
-        <td id="LC966" class="blob-code js-file-line">  <span class="pl-c">/* Stack */</span></td>
-      </tr>
-      <tr>
-        <td id="L967" class="blob-num js-line-number" data-line-number="967"></td>
-        <td id="LC967" class="blob-code js-file-line">  <span class="pl-st">int</span> st = <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L968" class="blob-num js-line-number" data-line-number="968"></td>
-        <td id="LC968" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L969" class="blob-num js-line-number" data-line-number="969"></td>
-        <td id="LC969" class="blob-code js-file-line">  <span class="pl-s3">mpc_stack_t</span> *stk = <span class="pl-s3">mpc_stack_new</span>(i-&gt;filename);</td>
-      </tr>
-      <tr>
-        <td id="L970" class="blob-num js-line-number" data-line-number="970"></td>
-        <td id="LC970" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L971" class="blob-num js-line-number" data-line-number="971"></td>
-        <td id="LC971" class="blob-code js-file-line">  <span class="pl-c">/* Variables */</span></td>
-      </tr>
-      <tr>
-        <td id="L972" class="blob-num js-line-number" data-line-number="972"></td>
-        <td id="LC972" class="blob-code js-file-line">  <span class="pl-st">char</span> *s;</td>
-      </tr>
-      <tr>
-        <td id="L973" class="blob-num js-line-number" data-line-number="973"></td>
-        <td id="LC973" class="blob-code js-file-line">  <span class="pl-s3">mpc_result_t</span> r;</td>
-      </tr>
-      <tr>
-        <td id="L974" class="blob-num js-line-number" data-line-number="974"></td>
-        <td id="LC974" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L975" class="blob-num js-line-number" data-line-number="975"></td>
-        <td id="LC975" class="blob-code js-file-line">  <span class="pl-c">/* Go! */</span></td>
-      </tr>
-      <tr>
-        <td id="L976" class="blob-num js-line-number" data-line-number="976"></td>
-        <td id="LC976" class="blob-code js-file-line">  <span class="pl-s3">mpc_stack_pushp</span>(stk, init);</td>
-      </tr>
-      <tr>
-        <td id="L977" class="blob-num js-line-number" data-line-number="977"></td>
-        <td id="LC977" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L978" class="blob-num js-line-number" data-line-number="978"></td>
-        <td id="LC978" class="blob-code js-file-line">  <span class="pl-k">while</span> (!<span class="pl-s3">mpc_stack_empty</span>(stk)) {</td>
-      </tr>
-      <tr>
-        <td id="L979" class="blob-num js-line-number" data-line-number="979"></td>
-        <td id="LC979" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L980" class="blob-num js-line-number" data-line-number="980"></td>
-        <td id="LC980" class="blob-code js-file-line">    <span class="pl-s3">mpc_stack_peepp</span>(stk, &amp;p, &amp;st);</td>
-      </tr>
-      <tr>
-        <td id="L981" class="blob-num js-line-number" data-line-number="981"></td>
-        <td id="LC981" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L982" class="blob-num js-line-number" data-line-number="982"></td>
-        <td id="LC982" class="blob-code js-file-line">    <span class="pl-k">switch</span> (p-&gt;type) {</td>
-      </tr>
-      <tr>
-        <td id="L983" class="blob-num js-line-number" data-line-number="983"></td>
-        <td id="LC983" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L984" class="blob-num js-line-number" data-line-number="984"></td>
-        <td id="LC984" class="blob-code js-file-line">      <span class="pl-c">/* Basic Parsers */</span></td>
-      </tr>
-      <tr>
-        <td id="L985" class="blob-num js-line-number" data-line-number="985"></td>
-        <td id="LC985" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L986" class="blob-num js-line-number" data-line-number="986"></td>
-        <td id="LC986" class="blob-code js-file-line">      <span class="pl-k">case</span> MPC_TYPE_ANY:       <span class="pl-s3">MPC_PRIMATIVE</span>(s, <span class="pl-s3">mpc_input_any</span>(i, &amp;s));</td>
-      </tr>
-      <tr>
-        <td id="L987" class="blob-num js-line-number" data-line-number="987"></td>
-        <td id="LC987" class="blob-code js-file-line">      <span class="pl-k">case</span> MPC_TYPE_SINGLE:    <span class="pl-s3">MPC_PRIMATIVE</span>(s, <span class="pl-s3">mpc_input_char</span>(i, p-&gt;data.<span class="pl-vo">single</span>.<span class="pl-vo">x</span>, &amp;s));</td>
-      </tr>
-      <tr>
-        <td id="L988" class="blob-num js-line-number" data-line-number="988"></td>
-        <td id="LC988" class="blob-code js-file-line">      <span class="pl-k">case</span> MPC_TYPE_RANGE:     <span class="pl-s3">MPC_PRIMATIVE</span>(s, <span class="pl-s3">mpc_input_range</span>(i, p-&gt;data.<span class="pl-vo">range</span>.<span class="pl-vo">x</span>, p-&gt;data.<span class="pl-vo">range</span>.<span class="pl-vo">y</span>, &amp;s));</td>
-      </tr>
-      <tr>
-        <td id="L989" class="blob-num js-line-number" data-line-number="989"></td>
-        <td id="LC989" class="blob-code js-file-line">      <span class="pl-k">case</span> MPC_TYPE_ONEOF:     <span class="pl-s3">MPC_PRIMATIVE</span>(s, <span class="pl-s3">mpc_input_oneof</span>(i, p-&gt;data.<span class="pl-vo">string</span>.<span class="pl-vo">x</span>, &amp;s));</td>
-      </tr>
-      <tr>
-        <td id="L990" class="blob-num js-line-number" data-line-number="990"></td>
-        <td id="LC990" class="blob-code js-file-line">      <span class="pl-k">case</span> MPC_TYPE_NONEOF:    <span class="pl-s3">MPC_PRIMATIVE</span>(s, <span class="pl-s3">mpc_input_noneof</span>(i, p-&gt;data.<span class="pl-vo">string</span>.<span class="pl-vo">x</span>, &amp;s));</td>
-      </tr>
-      <tr>
-        <td id="L991" class="blob-num js-line-number" data-line-number="991"></td>
-        <td id="LC991" class="blob-code js-file-line">      <span class="pl-k">case</span> MPC_TYPE_SATISFY:   <span class="pl-s3">MPC_PRIMATIVE</span>(s, <span class="pl-s3">mpc_input_satisfy</span>(i, p-&gt;data.<span class="pl-vo">satisfy</span>.<span class="pl-vo">f</span>, &amp;s));</td>
-      </tr>
-      <tr>
-        <td id="L992" class="blob-num js-line-number" data-line-number="992"></td>
-        <td id="LC992" class="blob-code js-file-line">      <span class="pl-k">case</span> MPC_TYPE_STRING:    <span class="pl-s3">MPC_PRIMATIVE</span>(s, <span class="pl-s3">mpc_input_string</span>(i, p-&gt;data.<span class="pl-vo">string</span>.<span class="pl-vo">x</span>, &amp;s));</td>
-      </tr>
-      <tr>
-        <td id="L993" class="blob-num js-line-number" data-line-number="993"></td>
-        <td id="LC993" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L994" class="blob-num js-line-number" data-line-number="994"></td>
-        <td id="LC994" class="blob-code js-file-line">      <span class="pl-c">/* Other parsers */</span></td>
-      </tr>
-      <tr>
-        <td id="L995" class="blob-num js-line-number" data-line-number="995"></td>
-        <td id="LC995" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L996" class="blob-num js-line-number" data-line-number="996"></td>
-        <td id="LC996" class="blob-code js-file-line">      <span class="pl-k">case</span> MPC_TYPE_UNDEFINED: <span class="pl-s3">MPC_FAILURE</span>(<span class="pl-s3">mpc_err_fail</span>(i-&gt;filename, i-&gt;state, <span class="pl-s1"><span class="pl-pds">&quot;</span>Parser Undefined!<span class="pl-pds">&quot;</span></span>));      </td>
-      </tr>
-      <tr>
-        <td id="L997" class="blob-num js-line-number" data-line-number="997"></td>
-        <td id="LC997" class="blob-code js-file-line">      <span class="pl-k">case</span> MPC_TYPE_PASS:      <span class="pl-s3">MPC_SUCCESS</span>(<span class="pl-c1">NULL</span>);</td>
-      </tr>
-      <tr>
-        <td id="L998" class="blob-num js-line-number" data-line-number="998"></td>
-        <td id="LC998" class="blob-code js-file-line">      <span class="pl-k">case</span> MPC_TYPE_FAIL:      <span class="pl-s3">MPC_FAILURE</span>(<span class="pl-s3">mpc_err_fail</span>(i-&gt;filename, i-&gt;state, p-&gt;data.<span class="pl-vo">fail</span>.<span class="pl-vo">m</span>));</td>
-      </tr>
-      <tr>
-        <td id="L999" class="blob-num js-line-number" data-line-number="999"></td>
-        <td id="LC999" class="blob-code js-file-line">      <span class="pl-k">case</span> MPC_TYPE_LIFT:      <span class="pl-s3">MPC_SUCCESS</span>(p-&gt;data.<span class="pl-vo">lift</span>.<span class="pl-s3">lf</span>());</td>
-      </tr>
-      <tr>
-        <td id="L1000" class="blob-num js-line-number" data-line-number="1000"></td>
-        <td id="LC1000" class="blob-code js-file-line">      <span class="pl-k">case</span> MPC_TYPE_LIFT_VAL:  <span class="pl-s3">MPC_SUCCESS</span>(p-&gt;data.<span class="pl-vo">lift</span>.<span class="pl-vo">x</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1001" class="blob-num js-line-number" data-line-number="1001"></td>
-        <td id="LC1001" class="blob-code js-file-line">      <span class="pl-k">case</span> MPC_TYPE_STATE:     <span class="pl-s3">MPC_SUCCESS</span>(<span class="pl-s3">mpc_state_copy</span>(i-&gt;state));</td>
-      </tr>
-      <tr>
-        <td id="L1002" class="blob-num js-line-number" data-line-number="1002"></td>
-        <td id="LC1002" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L1003" class="blob-num js-line-number" data-line-number="1003"></td>
-        <td id="LC1003" class="blob-code js-file-line">      <span class="pl-k">case</span> MPC_TYPE_ANCHOR:</td>
-      </tr>
-      <tr>
-        <td id="L1004" class="blob-num js-line-number" data-line-number="1004"></td>
-        <td id="LC1004" class="blob-code js-file-line">        <span class="pl-k">if</span> (<span class="pl-s3">mpc_input_anchor</span>(i, p-&gt;data.<span class="pl-vo">anchor</span>.<span class="pl-vo">f</span>)) {</td>
-      </tr>
-      <tr>
-        <td id="L1005" class="blob-num js-line-number" data-line-number="1005"></td>
-        <td id="LC1005" class="blob-code js-file-line">          <span class="pl-s3">MPC_SUCCESS</span>(<span class="pl-c1">NULL</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1006" class="blob-num js-line-number" data-line-number="1006"></td>
-        <td id="LC1006" class="blob-code js-file-line">        } <span class="pl-k">else</span> {</td>
-      </tr>
-      <tr>
-        <td id="L1007" class="blob-num js-line-number" data-line-number="1007"></td>
-        <td id="LC1007" class="blob-code js-file-line">          <span class="pl-s3">MPC_FAILURE</span>(<span class="pl-s3">mpc_err_new</span>(i-&gt;filename, i-&gt;state, <span class="pl-s1"><span class="pl-pds">&quot;</span>anchor<span class="pl-pds">&quot;</span></span>, <span class="pl-s3">mpc_input_peekc</span>(i)));</td>
-      </tr>
-      <tr>
-        <td id="L1008" class="blob-num js-line-number" data-line-number="1008"></td>
-        <td id="LC1008" class="blob-code js-file-line">        }</td>
-      </tr>
-      <tr>
-        <td id="L1009" class="blob-num js-line-number" data-line-number="1009"></td>
-        <td id="LC1009" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L1010" class="blob-num js-line-number" data-line-number="1010"></td>
-        <td id="LC1010" class="blob-code js-file-line">      <span class="pl-c">/* Application Parsers */</span></td>
-      </tr>
-      <tr>
-        <td id="L1011" class="blob-num js-line-number" data-line-number="1011"></td>
-        <td id="LC1011" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L1012" class="blob-num js-line-number" data-line-number="1012"></td>
-        <td id="LC1012" class="blob-code js-file-line">      <span class="pl-k">case</span> MPC_TYPE_EXPECT:</td>
-      </tr>
-      <tr>
-        <td id="L1013" class="blob-num js-line-number" data-line-number="1013"></td>
-        <td id="LC1013" class="blob-code js-file-line">        <span class="pl-k">if</span> (st == <span class="pl-c1">0</span>) { <span class="pl-s3">MPC_CONTINUE</span>(<span class="pl-c1">1</span>, p-&gt;data.<span class="pl-vo">expect</span>.<span class="pl-vo">x</span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1014" class="blob-num js-line-number" data-line-number="1014"></td>
-        <td id="LC1014" class="blob-code js-file-line">        <span class="pl-k">if</span> (st == <span class="pl-c1">1</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L1015" class="blob-num js-line-number" data-line-number="1015"></td>
-        <td id="LC1015" class="blob-code js-file-line">          <span class="pl-k">if</span> (<span class="pl-s3">mpc_stack_popr</span>(stk, &amp;r)) {</td>
-      </tr>
-      <tr>
-        <td id="L1016" class="blob-num js-line-number" data-line-number="1016"></td>
-        <td id="LC1016" class="blob-code js-file-line">            <span class="pl-s3">MPC_SUCCESS</span>(r.<span class="pl-vo">output</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1017" class="blob-num js-line-number" data-line-number="1017"></td>
-        <td id="LC1017" class="blob-code js-file-line">          } <span class="pl-k">else</span> {</td>
-      </tr>
-      <tr>
-        <td id="L1018" class="blob-num js-line-number" data-line-number="1018"></td>
-        <td id="LC1018" class="blob-code js-file-line">            <span class="pl-s3">mpc_err_delete</span>(r.<span class="pl-vo">error</span>); </td>
-      </tr>
-      <tr>
-        <td id="L1019" class="blob-num js-line-number" data-line-number="1019"></td>
-        <td id="LC1019" class="blob-code js-file-line">            <span class="pl-s3">MPC_FAILURE</span>(<span class="pl-s3">mpc_err_new</span>(i-&gt;filename, i-&gt;state, p-&gt;data.<span class="pl-vo">expect</span>.<span class="pl-vo">m</span>, <span class="pl-s3">mpc_input_peekc</span>(i)));</td>
-      </tr>
-      <tr>
-        <td id="L1020" class="blob-num js-line-number" data-line-number="1020"></td>
-        <td id="LC1020" class="blob-code js-file-line">          }</td>
-      </tr>
-      <tr>
-        <td id="L1021" class="blob-num js-line-number" data-line-number="1021"></td>
-        <td id="LC1021" class="blob-code js-file-line">        }</td>
-      </tr>
-      <tr>
-        <td id="L1022" class="blob-num js-line-number" data-line-number="1022"></td>
-        <td id="LC1022" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L1023" class="blob-num js-line-number" data-line-number="1023"></td>
-        <td id="LC1023" class="blob-code js-file-line">      <span class="pl-k">case</span> MPC_TYPE_APPLY:</td>
-      </tr>
-      <tr>
-        <td id="L1024" class="blob-num js-line-number" data-line-number="1024"></td>
-        <td id="LC1024" class="blob-code js-file-line">        <span class="pl-k">if</span> (st == <span class="pl-c1">0</span>) { <span class="pl-s3">MPC_CONTINUE</span>(<span class="pl-c1">1</span>, p-&gt;data.<span class="pl-vo">apply</span>.<span class="pl-vo">x</span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1025" class="blob-num js-line-number" data-line-number="1025"></td>
-        <td id="LC1025" class="blob-code js-file-line">        <span class="pl-k">if</span> (st == <span class="pl-c1">1</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L1026" class="blob-num js-line-number" data-line-number="1026"></td>
-        <td id="LC1026" class="blob-code js-file-line">          <span class="pl-k">if</span> (<span class="pl-s3">mpc_stack_popr</span>(stk, &amp;r)) {</td>
-      </tr>
-      <tr>
-        <td id="L1027" class="blob-num js-line-number" data-line-number="1027"></td>
-        <td id="LC1027" class="blob-code js-file-line">            <span class="pl-s3">MPC_SUCCESS</span>(p-&gt;data.<span class="pl-vo">apply</span>.<span class="pl-s3">f</span>(r.<span class="pl-vo">output</span>));</td>
-      </tr>
-      <tr>
-        <td id="L1028" class="blob-num js-line-number" data-line-number="1028"></td>
-        <td id="LC1028" class="blob-code js-file-line">          } <span class="pl-k">else</span> {</td>
-      </tr>
-      <tr>
-        <td id="L1029" class="blob-num js-line-number" data-line-number="1029"></td>
-        <td id="LC1029" class="blob-code js-file-line">            <span class="pl-s3">MPC_FAILURE</span>(r.<span class="pl-vo">error</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1030" class="blob-num js-line-number" data-line-number="1030"></td>
-        <td id="LC1030" class="blob-code js-file-line">          }</td>
-      </tr>
-      <tr>
-        <td id="L1031" class="blob-num js-line-number" data-line-number="1031"></td>
-        <td id="LC1031" class="blob-code js-file-line">        }</td>
-      </tr>
-      <tr>
-        <td id="L1032" class="blob-num js-line-number" data-line-number="1032"></td>
-        <td id="LC1032" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L1033" class="blob-num js-line-number" data-line-number="1033"></td>
-        <td id="LC1033" class="blob-code js-file-line">      <span class="pl-k">case</span> MPC_TYPE_APPLY_TO:</td>
-      </tr>
-      <tr>
-        <td id="L1034" class="blob-num js-line-number" data-line-number="1034"></td>
-        <td id="LC1034" class="blob-code js-file-line">        <span class="pl-k">if</span> (st == <span class="pl-c1">0</span>) { <span class="pl-s3">MPC_CONTINUE</span>(<span class="pl-c1">1</span>, p-&gt;data.<span class="pl-vo">apply_to</span>.<span class="pl-vo">x</span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1035" class="blob-num js-line-number" data-line-number="1035"></td>
-        <td id="LC1035" class="blob-code js-file-line">        <span class="pl-k">if</span> (st == <span class="pl-c1">1</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L1036" class="blob-num js-line-number" data-line-number="1036"></td>
-        <td id="LC1036" class="blob-code js-file-line">          <span class="pl-k">if</span> (<span class="pl-s3">mpc_stack_popr</span>(stk, &amp;r)) {</td>
-      </tr>
-      <tr>
-        <td id="L1037" class="blob-num js-line-number" data-line-number="1037"></td>
-        <td id="LC1037" class="blob-code js-file-line">            <span class="pl-s3">MPC_SUCCESS</span>(p-&gt;data.<span class="pl-vo">apply_to</span>.<span class="pl-s3">f</span>(r.<span class="pl-vo">output</span>, p-&gt;data.<span class="pl-vo">apply_to</span>.<span class="pl-vo">d</span>));</td>
-      </tr>
-      <tr>
-        <td id="L1038" class="blob-num js-line-number" data-line-number="1038"></td>
-        <td id="LC1038" class="blob-code js-file-line">          } <span class="pl-k">else</span> {</td>
-      </tr>
-      <tr>
-        <td id="L1039" class="blob-num js-line-number" data-line-number="1039"></td>
-        <td id="LC1039" class="blob-code js-file-line">            <span class="pl-s3">MPC_FAILURE</span>(r.<span class="pl-vo">error</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1040" class="blob-num js-line-number" data-line-number="1040"></td>
-        <td id="LC1040" class="blob-code js-file-line">          }</td>
-      </tr>
-      <tr>
-        <td id="L1041" class="blob-num js-line-number" data-line-number="1041"></td>
-        <td id="LC1041" class="blob-code js-file-line">        }</td>
-      </tr>
-      <tr>
-        <td id="L1042" class="blob-num js-line-number" data-line-number="1042"></td>
-        <td id="LC1042" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L1043" class="blob-num js-line-number" data-line-number="1043"></td>
-        <td id="LC1043" class="blob-code js-file-line">      <span class="pl-k">case</span> MPC_TYPE_PREDICT:</td>
-      </tr>
-      <tr>
-        <td id="L1044" class="blob-num js-line-number" data-line-number="1044"></td>
-        <td id="LC1044" class="blob-code js-file-line">        <span class="pl-k">if</span> (st == <span class="pl-c1">0</span>) { <span class="pl-s3">mpc_input_backtrack_disable</span>(i); <span class="pl-s3">MPC_CONTINUE</span>(<span class="pl-c1">1</span>, p-&gt;data.<span class="pl-vo">predict</span>.<span class="pl-vo">x</span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1045" class="blob-num js-line-number" data-line-number="1045"></td>
-        <td id="LC1045" class="blob-code js-file-line">        <span class="pl-k">if</span> (st == <span class="pl-c1">1</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L1046" class="blob-num js-line-number" data-line-number="1046"></td>
-        <td id="LC1046" class="blob-code js-file-line">          <span class="pl-s3">mpc_input_backtrack_enable</span>(i);</td>
-      </tr>
-      <tr>
-        <td id="L1047" class="blob-num js-line-number" data-line-number="1047"></td>
-        <td id="LC1047" class="blob-code js-file-line">          <span class="pl-s3">mpc_stack_popp</span>(stk, &amp;p, &amp;st);</td>
-      </tr>
-      <tr>
-        <td id="L1048" class="blob-num js-line-number" data-line-number="1048"></td>
-        <td id="LC1048" class="blob-code js-file-line">          <span class="pl-k">continue</span>;</td>
-      </tr>
-      <tr>
-        <td id="L1049" class="blob-num js-line-number" data-line-number="1049"></td>
-        <td id="LC1049" class="blob-code js-file-line">        }</td>
-      </tr>
-      <tr>
-        <td id="L1050" class="blob-num js-line-number" data-line-number="1050"></td>
-        <td id="LC1050" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L1051" class="blob-num js-line-number" data-line-number="1051"></td>
-        <td id="LC1051" class="blob-code js-file-line">      <span class="pl-c">/* Optional Parsers */</span></td>
-      </tr>
-      <tr>
-        <td id="L1052" class="blob-num js-line-number" data-line-number="1052"></td>
-        <td id="LC1052" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L1053" class="blob-num js-line-number" data-line-number="1053"></td>
-        <td id="LC1053" class="blob-code js-file-line">      <span class="pl-c">/* TODO: Update Not Error Message */</span></td>
-      </tr>
-      <tr>
-        <td id="L1054" class="blob-num js-line-number" data-line-number="1054"></td>
-        <td id="LC1054" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L1055" class="blob-num js-line-number" data-line-number="1055"></td>
-        <td id="LC1055" class="blob-code js-file-line">      <span class="pl-k">case</span> MPC_TYPE_NOT:</td>
-      </tr>
-      <tr>
-        <td id="L1056" class="blob-num js-line-number" data-line-number="1056"></td>
-        <td id="LC1056" class="blob-code js-file-line">        <span class="pl-k">if</span> (st == <span class="pl-c1">0</span>) { <span class="pl-s3">mpc_input_mark</span>(i); <span class="pl-s3">MPC_CONTINUE</span>(<span class="pl-c1">1</span>, p-&gt;data.<span class="pl-vo">not</span>.<span class="pl-vo">x</span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1057" class="blob-num js-line-number" data-line-number="1057"></td>
-        <td id="LC1057" class="blob-code js-file-line">        <span class="pl-k">if</span> (st == <span class="pl-c1">1</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L1058" class="blob-num js-line-number" data-line-number="1058"></td>
-        <td id="LC1058" class="blob-code js-file-line">          <span class="pl-k">if</span> (<span class="pl-s3">mpc_stack_popr</span>(stk, &amp;r)) {</td>
-      </tr>
-      <tr>
-        <td id="L1059" class="blob-num js-line-number" data-line-number="1059"></td>
-        <td id="LC1059" class="blob-code js-file-line">            <span class="pl-s3">mpc_input_rewind</span>(i);</td>
-      </tr>
-      <tr>
-        <td id="L1060" class="blob-num js-line-number" data-line-number="1060"></td>
-        <td id="LC1060" class="blob-code js-file-line">            p-&gt;data.<span class="pl-vo">not</span>.<span class="pl-s3">dx</span>(r.<span class="pl-vo">output</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1061" class="blob-num js-line-number" data-line-number="1061"></td>
-        <td id="LC1061" class="blob-code js-file-line">            <span class="pl-s3">MPC_FAILURE</span>(<span class="pl-s3">mpc_err_new</span>(i-&gt;filename, i-&gt;state, <span class="pl-s1"><span class="pl-pds">&quot;</span>opposite<span class="pl-pds">&quot;</span></span>, <span class="pl-s3">mpc_input_peekc</span>(i)));</td>
-      </tr>
-      <tr>
-        <td id="L1062" class="blob-num js-line-number" data-line-number="1062"></td>
-        <td id="LC1062" class="blob-code js-file-line">          } <span class="pl-k">else</span> {</td>
-      </tr>
-      <tr>
-        <td id="L1063" class="blob-num js-line-number" data-line-number="1063"></td>
-        <td id="LC1063" class="blob-code js-file-line">            <span class="pl-s3">mpc_input_unmark</span>(i);</td>
-      </tr>
-      <tr>
-        <td id="L1064" class="blob-num js-line-number" data-line-number="1064"></td>
-        <td id="LC1064" class="blob-code js-file-line">            <span class="pl-s3">mpc_stack_err</span>(stk, r.<span class="pl-vo">error</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1065" class="blob-num js-line-number" data-line-number="1065"></td>
-        <td id="LC1065" class="blob-code js-file-line">            <span class="pl-s3">MPC_SUCCESS</span>(p-&gt;data.<span class="pl-vo">not</span>.<span class="pl-s3">lf</span>());</td>
-      </tr>
-      <tr>
-        <td id="L1066" class="blob-num js-line-number" data-line-number="1066"></td>
-        <td id="LC1066" class="blob-code js-file-line">          }</td>
-      </tr>
-      <tr>
-        <td id="L1067" class="blob-num js-line-number" data-line-number="1067"></td>
-        <td id="LC1067" class="blob-code js-file-line">        }</td>
-      </tr>
-      <tr>
-        <td id="L1068" class="blob-num js-line-number" data-line-number="1068"></td>
-        <td id="LC1068" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L1069" class="blob-num js-line-number" data-line-number="1069"></td>
-        <td id="LC1069" class="blob-code js-file-line">      <span class="pl-k">case</span> MPC_TYPE_MAYBE:</td>
-      </tr>
-      <tr>
-        <td id="L1070" class="blob-num js-line-number" data-line-number="1070"></td>
-        <td id="LC1070" class="blob-code js-file-line">        <span class="pl-k">if</span> (st == <span class="pl-c1">0</span>) { <span class="pl-s3">MPC_CONTINUE</span>(<span class="pl-c1">1</span>, p-&gt;data.<span class="pl-vo">not</span>.<span class="pl-vo">x</span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1071" class="blob-num js-line-number" data-line-number="1071"></td>
-        <td id="LC1071" class="blob-code js-file-line">        <span class="pl-k">if</span> (st == <span class="pl-c1">1</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L1072" class="blob-num js-line-number" data-line-number="1072"></td>
-        <td id="LC1072" class="blob-code js-file-line">          <span class="pl-k">if</span> (<span class="pl-s3">mpc_stack_popr</span>(stk, &amp;r)) {</td>
-      </tr>
-      <tr>
-        <td id="L1073" class="blob-num js-line-number" data-line-number="1073"></td>
-        <td id="LC1073" class="blob-code js-file-line">            <span class="pl-s3">MPC_SUCCESS</span>(r.<span class="pl-vo">output</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1074" class="blob-num js-line-number" data-line-number="1074"></td>
-        <td id="LC1074" class="blob-code js-file-line">          } <span class="pl-k">else</span> {</td>
-      </tr>
-      <tr>
-        <td id="L1075" class="blob-num js-line-number" data-line-number="1075"></td>
-        <td id="LC1075" class="blob-code js-file-line">            <span class="pl-s3">mpc_stack_err</span>(stk, r.<span class="pl-vo">error</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1076" class="blob-num js-line-number" data-line-number="1076"></td>
-        <td id="LC1076" class="blob-code js-file-line">            <span class="pl-s3">MPC_SUCCESS</span>(p-&gt;data.<span class="pl-vo">not</span>.<span class="pl-s3">lf</span>());</td>
-      </tr>
-      <tr>
-        <td id="L1077" class="blob-num js-line-number" data-line-number="1077"></td>
-        <td id="LC1077" class="blob-code js-file-line">          }</td>
-      </tr>
-      <tr>
-        <td id="L1078" class="blob-num js-line-number" data-line-number="1078"></td>
-        <td id="LC1078" class="blob-code js-file-line">        }</td>
-      </tr>
-      <tr>
-        <td id="L1079" class="blob-num js-line-number" data-line-number="1079"></td>
-        <td id="LC1079" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L1080" class="blob-num js-line-number" data-line-number="1080"></td>
-        <td id="LC1080" class="blob-code js-file-line">      <span class="pl-c">/* Repeat Parsers */</span></td>
-      </tr>
-      <tr>
-        <td id="L1081" class="blob-num js-line-number" data-line-number="1081"></td>
-        <td id="LC1081" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L1082" class="blob-num js-line-number" data-line-number="1082"></td>
-        <td id="LC1082" class="blob-code js-file-line">      <span class="pl-k">case</span> MPC_TYPE_MANY:</td>
-      </tr>
-      <tr>
-        <td id="L1083" class="blob-num js-line-number" data-line-number="1083"></td>
-        <td id="LC1083" class="blob-code js-file-line">        <span class="pl-k">if</span> (st == <span class="pl-c1">0</span>) { <span class="pl-s3">MPC_CONTINUE</span>(st+<span class="pl-c1">1</span>, p-&gt;data.<span class="pl-vo">repeat</span>.<span class="pl-vo">x</span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1084" class="blob-num js-line-number" data-line-number="1084"></td>
-        <td id="LC1084" class="blob-code js-file-line">        <span class="pl-k">if</span> (st &gt;  <span class="pl-c1">0</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L1085" class="blob-num js-line-number" data-line-number="1085"></td>
-        <td id="LC1085" class="blob-code js-file-line">          <span class="pl-k">if</span> (<span class="pl-s3">mpc_stack_peekr</span>(stk, &amp;r)) {</td>
-      </tr>
-      <tr>
-        <td id="L1086" class="blob-num js-line-number" data-line-number="1086"></td>
-        <td id="LC1086" class="blob-code js-file-line">            <span class="pl-s3">MPC_CONTINUE</span>(st+<span class="pl-c1">1</span>, p-&gt;data.<span class="pl-vo">repeat</span>.<span class="pl-vo">x</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1087" class="blob-num js-line-number" data-line-number="1087"></td>
-        <td id="LC1087" class="blob-code js-file-line">          } <span class="pl-k">else</span> {</td>
-      </tr>
-      <tr>
-        <td id="L1088" class="blob-num js-line-number" data-line-number="1088"></td>
-        <td id="LC1088" class="blob-code js-file-line">            <span class="pl-s3">mpc_stack_popr</span>(stk, &amp;r);</td>
-      </tr>
-      <tr>
-        <td id="L1089" class="blob-num js-line-number" data-line-number="1089"></td>
-        <td id="LC1089" class="blob-code js-file-line">            <span class="pl-s3">mpc_stack_err</span>(stk, r.<span class="pl-vo">error</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1090" class="blob-num js-line-number" data-line-number="1090"></td>
-        <td id="LC1090" class="blob-code js-file-line">            <span class="pl-s3">MPC_SUCCESS</span>(<span class="pl-s3">mpc_stack_merger_out</span>(stk, st-<span class="pl-c1">1</span>, p-&gt;data.<span class="pl-vo">repeat</span>.<span class="pl-vo">f</span>));</td>
-      </tr>
-      <tr>
-        <td id="L1091" class="blob-num js-line-number" data-line-number="1091"></td>
-        <td id="LC1091" class="blob-code js-file-line">          }</td>
-      </tr>
-      <tr>
-        <td id="L1092" class="blob-num js-line-number" data-line-number="1092"></td>
-        <td id="LC1092" class="blob-code js-file-line">        }</td>
-      </tr>
-      <tr>
-        <td id="L1093" class="blob-num js-line-number" data-line-number="1093"></td>
-        <td id="LC1093" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L1094" class="blob-num js-line-number" data-line-number="1094"></td>
-        <td id="LC1094" class="blob-code js-file-line">      <span class="pl-k">case</span> MPC_TYPE_MANY1:</td>
-      </tr>
-      <tr>
-        <td id="L1095" class="blob-num js-line-number" data-line-number="1095"></td>
-        <td id="LC1095" class="blob-code js-file-line">        <span class="pl-k">if</span> (st == <span class="pl-c1">0</span>) { <span class="pl-s3">MPC_CONTINUE</span>(st+<span class="pl-c1">1</span>, p-&gt;data.<span class="pl-vo">repeat</span>.<span class="pl-vo">x</span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1096" class="blob-num js-line-number" data-line-number="1096"></td>
-        <td id="LC1096" class="blob-code js-file-line">        <span class="pl-k">if</span> (st &gt;  <span class="pl-c1">0</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L1097" class="blob-num js-line-number" data-line-number="1097"></td>
-        <td id="LC1097" class="blob-code js-file-line">          <span class="pl-k">if</span> (<span class="pl-s3">mpc_stack_peekr</span>(stk, &amp;r)) {</td>
-      </tr>
-      <tr>
-        <td id="L1098" class="blob-num js-line-number" data-line-number="1098"></td>
-        <td id="LC1098" class="blob-code js-file-line">            <span class="pl-s3">MPC_CONTINUE</span>(st+<span class="pl-c1">1</span>, p-&gt;data.<span class="pl-vo">repeat</span>.<span class="pl-vo">x</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1099" class="blob-num js-line-number" data-line-number="1099"></td>
-        <td id="LC1099" class="blob-code js-file-line">          } <span class="pl-k">else</span> {</td>
-      </tr>
-      <tr>
-        <td id="L1100" class="blob-num js-line-number" data-line-number="1100"></td>
-        <td id="LC1100" class="blob-code js-file-line">            <span class="pl-k">if</span> (st == <span class="pl-c1">1</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L1101" class="blob-num js-line-number" data-line-number="1101"></td>
-        <td id="LC1101" class="blob-code js-file-line">              <span class="pl-s3">mpc_stack_popr</span>(stk, &amp;r);</td>
-      </tr>
-      <tr>
-        <td id="L1102" class="blob-num js-line-number" data-line-number="1102"></td>
-        <td id="LC1102" class="blob-code js-file-line">              <span class="pl-s3">MPC_FAILURE</span>(<span class="pl-s3">mpc_err_many1</span>(r.<span class="pl-vo">error</span>));</td>
-      </tr>
-      <tr>
-        <td id="L1103" class="blob-num js-line-number" data-line-number="1103"></td>
-        <td id="LC1103" class="blob-code js-file-line">            } <span class="pl-k">else</span> {</td>
-      </tr>
-      <tr>
-        <td id="L1104" class="blob-num js-line-number" data-line-number="1104"></td>
-        <td id="LC1104" class="blob-code js-file-line">              <span class="pl-s3">mpc_stack_popr</span>(stk, &amp;r);</td>
-      </tr>
-      <tr>
-        <td id="L1105" class="blob-num js-line-number" data-line-number="1105"></td>
-        <td id="LC1105" class="blob-code js-file-line">              <span class="pl-s3">mpc_stack_err</span>(stk, r.<span class="pl-vo">error</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1106" class="blob-num js-line-number" data-line-number="1106"></td>
-        <td id="LC1106" class="blob-code js-file-line">              <span class="pl-s3">MPC_SUCCESS</span>(<span class="pl-s3">mpc_stack_merger_out</span>(stk, st-<span class="pl-c1">1</span>, p-&gt;data.<span class="pl-vo">repeat</span>.<span class="pl-vo">f</span>));</td>
-      </tr>
-      <tr>
-        <td id="L1107" class="blob-num js-line-number" data-line-number="1107"></td>
-        <td id="LC1107" class="blob-code js-file-line">            }</td>
-      </tr>
-      <tr>
-        <td id="L1108" class="blob-num js-line-number" data-line-number="1108"></td>
-        <td id="LC1108" class="blob-code js-file-line">          }</td>
-      </tr>
-      <tr>
-        <td id="L1109" class="blob-num js-line-number" data-line-number="1109"></td>
-        <td id="LC1109" class="blob-code js-file-line">        }</td>
-      </tr>
-      <tr>
-        <td id="L1110" class="blob-num js-line-number" data-line-number="1110"></td>
-        <td id="LC1110" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L1111" class="blob-num js-line-number" data-line-number="1111"></td>
-        <td id="LC1111" class="blob-code js-file-line">      <span class="pl-k">case</span> MPC_TYPE_COUNT:</td>
-      </tr>
-      <tr>
-        <td id="L1112" class="blob-num js-line-number" data-line-number="1112"></td>
-        <td id="LC1112" class="blob-code js-file-line">        <span class="pl-k">if</span> (st == <span class="pl-c1">0</span>) { <span class="pl-s3">mpc_input_mark</span>(i); <span class="pl-s3">MPC_CONTINUE</span>(st+<span class="pl-c1">1</span>, p-&gt;data.<span class="pl-vo">repeat</span>.<span class="pl-vo">x</span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1113" class="blob-num js-line-number" data-line-number="1113"></td>
-        <td id="LC1113" class="blob-code js-file-line">        <span class="pl-k">if</span> (st &gt;  <span class="pl-c1">0</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L1114" class="blob-num js-line-number" data-line-number="1114"></td>
-        <td id="LC1114" class="blob-code js-file-line">          <span class="pl-k">if</span> (<span class="pl-s3">mpc_stack_peekr</span>(stk, &amp;r)) {</td>
-      </tr>
-      <tr>
-        <td id="L1115" class="blob-num js-line-number" data-line-number="1115"></td>
-        <td id="LC1115" class="blob-code js-file-line">            <span class="pl-s3">MPC_CONTINUE</span>(st+<span class="pl-c1">1</span>, p-&gt;data.<span class="pl-vo">repeat</span>.<span class="pl-vo">x</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1116" class="blob-num js-line-number" data-line-number="1116"></td>
-        <td id="LC1116" class="blob-code js-file-line">          } <span class="pl-k">else</span> {</td>
-      </tr>
-      <tr>
-        <td id="L1117" class="blob-num js-line-number" data-line-number="1117"></td>
-        <td id="LC1117" class="blob-code js-file-line">            <span class="pl-k">if</span> (st != (p-&gt;data.<span class="pl-vo">repeat</span>.<span class="pl-vo">n</span>+<span class="pl-c1">1</span>)) {</td>
-      </tr>
-      <tr>
-        <td id="L1118" class="blob-num js-line-number" data-line-number="1118"></td>
-        <td id="LC1118" class="blob-code js-file-line">              <span class="pl-s3">mpc_stack_popr</span>(stk, &amp;r);</td>
-      </tr>
-      <tr>
-        <td id="L1119" class="blob-num js-line-number" data-line-number="1119"></td>
-        <td id="LC1119" class="blob-code js-file-line">              <span class="pl-s3">mpc_stack_popr_out_single</span>(stk, st-<span class="pl-c1">1</span>, p-&gt;data.<span class="pl-vo">repeat</span>.<span class="pl-vo">dx</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1120" class="blob-num js-line-number" data-line-number="1120"></td>
-        <td id="LC1120" class="blob-code js-file-line">              <span class="pl-s3">mpc_input_rewind</span>(i);</td>
-      </tr>
-      <tr>
-        <td id="L1121" class="blob-num js-line-number" data-line-number="1121"></td>
-        <td id="LC1121" class="blob-code js-file-line">              <span class="pl-s3">MPC_FAILURE</span>(<span class="pl-s3">mpc_err_count</span>(r.<span class="pl-vo">error</span>, p-&gt;data.<span class="pl-vo">repeat</span>.<span class="pl-vo">n</span>));</td>
-      </tr>
-      <tr>
-        <td id="L1122" class="blob-num js-line-number" data-line-number="1122"></td>
-        <td id="LC1122" class="blob-code js-file-line">            } <span class="pl-k">else</span> {</td>
-      </tr>
-      <tr>
-        <td id="L1123" class="blob-num js-line-number" data-line-number="1123"></td>
-        <td id="LC1123" class="blob-code js-file-line">              <span class="pl-s3">mpc_stack_popr</span>(stk, &amp;r);</td>
-      </tr>
-      <tr>
-        <td id="L1124" class="blob-num js-line-number" data-line-number="1124"></td>
-        <td id="LC1124" class="blob-code js-file-line">              <span class="pl-s3">mpc_stack_err</span>(stk, r.<span class="pl-vo">error</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1125" class="blob-num js-line-number" data-line-number="1125"></td>
-        <td id="LC1125" class="blob-code js-file-line">              <span class="pl-s3">mpc_input_unmark</span>(i);</td>
-      </tr>
-      <tr>
-        <td id="L1126" class="blob-num js-line-number" data-line-number="1126"></td>
-        <td id="LC1126" class="blob-code js-file-line">              <span class="pl-s3">MPC_SUCCESS</span>(<span class="pl-s3">mpc_stack_merger_out</span>(stk, st-<span class="pl-c1">1</span>, p-&gt;data.<span class="pl-vo">repeat</span>.<span class="pl-vo">f</span>));</td>
-      </tr>
-      <tr>
-        <td id="L1127" class="blob-num js-line-number" data-line-number="1127"></td>
-        <td id="LC1127" class="blob-code js-file-line">            }</td>
-      </tr>
-      <tr>
-        <td id="L1128" class="blob-num js-line-number" data-line-number="1128"></td>
-        <td id="LC1128" class="blob-code js-file-line">          }</td>
-      </tr>
-      <tr>
-        <td id="L1129" class="blob-num js-line-number" data-line-number="1129"></td>
-        <td id="LC1129" class="blob-code js-file-line">        }</td>
-      </tr>
-      <tr>
-        <td id="L1130" class="blob-num js-line-number" data-line-number="1130"></td>
-        <td id="LC1130" class="blob-code js-file-line">        </td>
-      </tr>
-      <tr>
-        <td id="L1131" class="blob-num js-line-number" data-line-number="1131"></td>
-        <td id="LC1131" class="blob-code js-file-line">      <span class="pl-c">/* Combinatory Parsers */</span></td>
-      </tr>
-      <tr>
-        <td id="L1132" class="blob-num js-line-number" data-line-number="1132"></td>
-        <td id="LC1132" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L1133" class="blob-num js-line-number" data-line-number="1133"></td>
-        <td id="LC1133" class="blob-code js-file-line">      <span class="pl-k">case</span> MPC_TYPE_OR:</td>
-      </tr>
-      <tr>
-        <td id="L1134" class="blob-num js-line-number" data-line-number="1134"></td>
-        <td id="LC1134" class="blob-code js-file-line">        </td>
-      </tr>
-      <tr>
-        <td id="L1135" class="blob-num js-line-number" data-line-number="1135"></td>
-        <td id="LC1135" class="blob-code js-file-line">        <span class="pl-k">if</span> (p-&gt;data.<span class="pl-vo">or</span>.<span class="pl-vo">n</span> == <span class="pl-c1">0</span>) { <span class="pl-s3">MPC_SUCCESS</span>(<span class="pl-c1">NULL</span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1136" class="blob-num js-line-number" data-line-number="1136"></td>
-        <td id="LC1136" class="blob-code js-file-line">        </td>
-      </tr>
-      <tr>
-        <td id="L1137" class="blob-num js-line-number" data-line-number="1137"></td>
-        <td id="LC1137" class="blob-code js-file-line">        <span class="pl-k">if</span> (st == <span class="pl-c1">0</span>) { <span class="pl-s3">MPC_CONTINUE</span>(st+<span class="pl-c1">1</span>, p-&gt;data.<span class="pl-vo">or</span>.<span class="pl-vo">xs</span>[st]); }</td>
-      </tr>
-      <tr>
-        <td id="L1138" class="blob-num js-line-number" data-line-number="1138"></td>
-        <td id="LC1138" class="blob-code js-file-line">        <span class="pl-k">if</span> (st &lt;= p-&gt;data.<span class="pl-vo">or</span>.<span class="pl-vo">n</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L1139" class="blob-num js-line-number" data-line-number="1139"></td>
-        <td id="LC1139" class="blob-code js-file-line">          <span class="pl-k">if</span> (<span class="pl-s3">mpc_stack_peekr</span>(stk, &amp;r)) {</td>
-      </tr>
-      <tr>
-        <td id="L1140" class="blob-num js-line-number" data-line-number="1140"></td>
-        <td id="LC1140" class="blob-code js-file-line">            <span class="pl-s3">mpc_stack_popr</span>(stk, &amp;r);</td>
-      </tr>
-      <tr>
-        <td id="L1141" class="blob-num js-line-number" data-line-number="1141"></td>
-        <td id="LC1141" class="blob-code js-file-line">            <span class="pl-s3">mpc_stack_popr_err</span>(stk, st-<span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1142" class="blob-num js-line-number" data-line-number="1142"></td>
-        <td id="LC1142" class="blob-code js-file-line">            <span class="pl-s3">MPC_SUCCESS</span>(r.<span class="pl-vo">output</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1143" class="blob-num js-line-number" data-line-number="1143"></td>
-        <td id="LC1143" class="blob-code js-file-line">          }</td>
-      </tr>
-      <tr>
-        <td id="L1144" class="blob-num js-line-number" data-line-number="1144"></td>
-        <td id="LC1144" class="blob-code js-file-line">          <span class="pl-k">if</span> (st &lt;  p-&gt;data.<span class="pl-vo">or</span>.<span class="pl-vo">n</span>) { <span class="pl-s3">MPC_CONTINUE</span>(st+<span class="pl-c1">1</span>, p-&gt;data.<span class="pl-vo">or</span>.<span class="pl-vo">xs</span>[st]); }</td>
-      </tr>
-      <tr>
-        <td id="L1145" class="blob-num js-line-number" data-line-number="1145"></td>
-        <td id="LC1145" class="blob-code js-file-line">          <span class="pl-k">if</span> (st == p-&gt;data.<span class="pl-vo">or</span>.<span class="pl-vo">n</span>) { <span class="pl-s3">MPC_FAILURE</span>(<span class="pl-s3">mpc_stack_merger_err</span>(stk, p-&gt;data.<span class="pl-vo">or</span>.<span class="pl-vo">n</span>)); }</td>
-      </tr>
-      <tr>
-        <td id="L1146" class="blob-num js-line-number" data-line-number="1146"></td>
-        <td id="LC1146" class="blob-code js-file-line">        }</td>
-      </tr>
-      <tr>
-        <td id="L1147" class="blob-num js-line-number" data-line-number="1147"></td>
-        <td id="LC1147" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L1148" class="blob-num js-line-number" data-line-number="1148"></td>
-        <td id="LC1148" class="blob-code js-file-line">      <span class="pl-k">case</span> MPC_TYPE_AND:</td>
-      </tr>
-      <tr>
-        <td id="L1149" class="blob-num js-line-number" data-line-number="1149"></td>
-        <td id="LC1149" class="blob-code js-file-line">        </td>
-      </tr>
-      <tr>
-        <td id="L1150" class="blob-num js-line-number" data-line-number="1150"></td>
-        <td id="LC1150" class="blob-code js-file-line">        <span class="pl-k">if</span> (p-&gt;data.<span class="pl-vo">or</span>.<span class="pl-vo">n</span> == <span class="pl-c1">0</span>) { <span class="pl-s3">MPC_SUCCESS</span>(p-&gt;data.<span class="pl-vo">and</span>.<span class="pl-s3">f</span>(<span class="pl-c1">0</span>, <span class="pl-c1">NULL</span>)); }</td>
-      </tr>
-      <tr>
-        <td id="L1151" class="blob-num js-line-number" data-line-number="1151"></td>
-        <td id="LC1151" class="blob-code js-file-line">        </td>
-      </tr>
-      <tr>
-        <td id="L1152" class="blob-num js-line-number" data-line-number="1152"></td>
-        <td id="LC1152" class="blob-code js-file-line">        <span class="pl-k">if</span> (st == <span class="pl-c1">0</span>) { <span class="pl-s3">mpc_input_mark</span>(i); <span class="pl-s3">MPC_CONTINUE</span>(st+<span class="pl-c1">1</span>, p-&gt;data.<span class="pl-vo">and</span>.<span class="pl-vo">xs</span>[st]); }</td>
-      </tr>
-      <tr>
-        <td id="L1153" class="blob-num js-line-number" data-line-number="1153"></td>
-        <td id="LC1153" class="blob-code js-file-line">        <span class="pl-k">if</span> (st &lt;= p-&gt;data.<span class="pl-vo">and</span>.<span class="pl-vo">n</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L1154" class="blob-num js-line-number" data-line-number="1154"></td>
-        <td id="LC1154" class="blob-code js-file-line">          <span class="pl-k">if</span> (!<span class="pl-s3">mpc_stack_peekr</span>(stk, &amp;r)) {</td>
-      </tr>
-      <tr>
-        <td id="L1155" class="blob-num js-line-number" data-line-number="1155"></td>
-        <td id="LC1155" class="blob-code js-file-line">            <span class="pl-s3">mpc_input_rewind</span>(i);</td>
-      </tr>
-      <tr>
-        <td id="L1156" class="blob-num js-line-number" data-line-number="1156"></td>
-        <td id="LC1156" class="blob-code js-file-line">            <span class="pl-s3">mpc_stack_popr</span>(stk, &amp;r);</td>
-      </tr>
-      <tr>
-        <td id="L1157" class="blob-num js-line-number" data-line-number="1157"></td>
-        <td id="LC1157" class="blob-code js-file-line">            <span class="pl-s3">mpc_stack_popr_out</span>(stk, st-<span class="pl-c1">1</span>, p-&gt;data.<span class="pl-vo">and</span>.<span class="pl-vo">dxs</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1158" class="blob-num js-line-number" data-line-number="1158"></td>
-        <td id="LC1158" class="blob-code js-file-line">            <span class="pl-s3">MPC_FAILURE</span>(r.<span class="pl-vo">error</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1159" class="blob-num js-line-number" data-line-number="1159"></td>
-        <td id="LC1159" class="blob-code js-file-line">          }</td>
-      </tr>
-      <tr>
-        <td id="L1160" class="blob-num js-line-number" data-line-number="1160"></td>
-        <td id="LC1160" class="blob-code js-file-line">          <span class="pl-k">if</span> (st &lt;  p-&gt;data.<span class="pl-vo">and</span>.<span class="pl-vo">n</span>) { <span class="pl-s3">MPC_CONTINUE</span>(st+<span class="pl-c1">1</span>, p-&gt;data.<span class="pl-vo">and</span>.<span class="pl-vo">xs</span>[st]); }</td>
-      </tr>
-      <tr>
-        <td id="L1161" class="blob-num js-line-number" data-line-number="1161"></td>
-        <td id="LC1161" class="blob-code js-file-line">          <span class="pl-k">if</span> (st == p-&gt;data.<span class="pl-vo">and</span>.<span class="pl-vo">n</span>) { <span class="pl-s3">mpc_input_unmark</span>(i); <span class="pl-s3">MPC_SUCCESS</span>(<span class="pl-s3">mpc_stack_merger_out</span>(stk, p-&gt;data.<span class="pl-vo">and</span>.<span class="pl-vo">n</span>, p-&gt;data.<span class="pl-vo">and</span>.<span class="pl-vo">f</span>)); }</td>
-      </tr>
-      <tr>
-        <td id="L1162" class="blob-num js-line-number" data-line-number="1162"></td>
-        <td id="LC1162" class="blob-code js-file-line">        }</td>
-      </tr>
-      <tr>
-        <td id="L1163" class="blob-num js-line-number" data-line-number="1163"></td>
-        <td id="LC1163" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L1164" class="blob-num js-line-number" data-line-number="1164"></td>
-        <td id="LC1164" class="blob-code js-file-line">      <span class="pl-c">/* End */</span></td>
-      </tr>
-      <tr>
-        <td id="L1165" class="blob-num js-line-number" data-line-number="1165"></td>
-        <td id="LC1165" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L1166" class="blob-num js-line-number" data-line-number="1166"></td>
-        <td id="LC1166" class="blob-code js-file-line">      <span class="pl-k">default</span>:</td>
-      </tr>
-      <tr>
-        <td id="L1167" class="blob-num js-line-number" data-line-number="1167"></td>
-        <td id="LC1167" class="blob-code js-file-line">        </td>
-      </tr>
-      <tr>
-        <td id="L1168" class="blob-num js-line-number" data-line-number="1168"></td>
-        <td id="LC1168" class="blob-code js-file-line">        <span class="pl-s3">MPC_FAILURE</span>(<span class="pl-s3">mpc_err_fail</span>(i-&gt;filename, i-&gt;state, <span class="pl-s1"><span class="pl-pds">&quot;</span>Unknown Parser Type Id!<span class="pl-pds">&quot;</span></span>));</td>
-      </tr>
-      <tr>
-        <td id="L1169" class="blob-num js-line-number" data-line-number="1169"></td>
-        <td id="LC1169" class="blob-code js-file-line">    }</td>
-      </tr>
-      <tr>
-        <td id="L1170" class="blob-num js-line-number" data-line-number="1170"></td>
-        <td id="LC1170" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L1171" class="blob-num js-line-number" data-line-number="1171"></td>
-        <td id="LC1171" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1172" class="blob-num js-line-number" data-line-number="1172"></td>
-        <td id="LC1172" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">mpc_stack_terminate</span>(stk, final);</td>
-      </tr>
-      <tr>
-        <td id="L1173" class="blob-num js-line-number" data-line-number="1173"></td>
-        <td id="LC1173" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1174" class="blob-num js-line-number" data-line-number="1174"></td>
-        <td id="LC1174" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1175" class="blob-num js-line-number" data-line-number="1175"></td>
-        <td id="LC1175" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1176" class="blob-num js-line-number" data-line-number="1176"></td>
-        <td id="LC1176" class="blob-code js-file-line">#<span class="pl-k">undef</span> MPC_CONTINUE</td>
-      </tr>
-      <tr>
-        <td id="L1177" class="blob-num js-line-number" data-line-number="1177"></td>
-        <td id="LC1177" class="blob-code js-file-line">#<span class="pl-k">undef</span> MPC_SUCCESS</td>
-      </tr>
-      <tr>
-        <td id="L1178" class="blob-num js-line-number" data-line-number="1178"></td>
-        <td id="LC1178" class="blob-code js-file-line">#<span class="pl-k">undef</span> MPC_FAILURE</td>
-      </tr>
-      <tr>
-        <td id="L1179" class="blob-num js-line-number" data-line-number="1179"></td>
-        <td id="LC1179" class="blob-code js-file-line">#<span class="pl-k">undef</span> MPC_PRIMATIVE</td>
-      </tr>
-      <tr>
-        <td id="L1180" class="blob-num js-line-number" data-line-number="1180"></td>
-        <td id="LC1180" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1181" class="blob-num js-line-number" data-line-number="1181"></td>
-        <td id="LC1181" class="blob-code js-file-line"><span class="pl-st">int</span> <span class="pl-en">mpc_parse</span>(<span class="pl-s">const</span> <span class="pl-st">char</span> *filename, <span class="pl-s">const</span> <span class="pl-st">char</span> *string, <span class="pl-s3">mpc_parser_t</span> *p, <span class="pl-s3">mpc_result_t</span> *r) {</td>
-      </tr>
-      <tr>
-        <td id="L1182" class="blob-num js-line-number" data-line-number="1182"></td>
-        <td id="LC1182" class="blob-code js-file-line">  <span class="pl-st">int</span> x;</td>
-      </tr>
-      <tr>
-        <td id="L1183" class="blob-num js-line-number" data-line-number="1183"></td>
-        <td id="LC1183" class="blob-code js-file-line">  <span class="pl-s3">mpc_input_t</span> *i = <span class="pl-s3">mpc_input_new_string</span>(filename, string);</td>
-      </tr>
-      <tr>
-        <td id="L1184" class="blob-num js-line-number" data-line-number="1184"></td>
-        <td id="LC1184" class="blob-code js-file-line">  x = <span class="pl-s3">mpc_parse_input</span>(i, p, r);</td>
-      </tr>
-      <tr>
-        <td id="L1185" class="blob-num js-line-number" data-line-number="1185"></td>
-        <td id="LC1185" class="blob-code js-file-line">  <span class="pl-s3">mpc_input_delete</span>(i);</td>
-      </tr>
-      <tr>
-        <td id="L1186" class="blob-num js-line-number" data-line-number="1186"></td>
-        <td id="LC1186" class="blob-code js-file-line">  <span class="pl-k">return</span> x;</td>
-      </tr>
-      <tr>
-        <td id="L1187" class="blob-num js-line-number" data-line-number="1187"></td>
-        <td id="LC1187" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1188" class="blob-num js-line-number" data-line-number="1188"></td>
-        <td id="LC1188" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1189" class="blob-num js-line-number" data-line-number="1189"></td>
-        <td id="LC1189" class="blob-code js-file-line"><span class="pl-st">int</span> <span class="pl-en">mpc_parse_file</span>(<span class="pl-s">const</span> <span class="pl-st">char</span> *filename, <span class="pl-s3">FILE</span> *file, <span class="pl-s3">mpc_parser_t</span> *p, <span class="pl-s3">mpc_result_t</span> *r) {</td>
-      </tr>
-      <tr>
-        <td id="L1190" class="blob-num js-line-number" data-line-number="1190"></td>
-        <td id="LC1190" class="blob-code js-file-line">  <span class="pl-st">int</span> x;</td>
-      </tr>
-      <tr>
-        <td id="L1191" class="blob-num js-line-number" data-line-number="1191"></td>
-        <td id="LC1191" class="blob-code js-file-line">  <span class="pl-s3">mpc_input_t</span> *i = <span class="pl-s3">mpc_input_new_file</span>(filename, file);</td>
-      </tr>
-      <tr>
-        <td id="L1192" class="blob-num js-line-number" data-line-number="1192"></td>
-        <td id="LC1192" class="blob-code js-file-line">  x = <span class="pl-s3">mpc_parse_input</span>(i, p, r);</td>
-      </tr>
-      <tr>
-        <td id="L1193" class="blob-num js-line-number" data-line-number="1193"></td>
-        <td id="LC1193" class="blob-code js-file-line">  <span class="pl-s3">mpc_input_delete</span>(i);</td>
-      </tr>
-      <tr>
-        <td id="L1194" class="blob-num js-line-number" data-line-number="1194"></td>
-        <td id="LC1194" class="blob-code js-file-line">  <span class="pl-k">return</span> x;</td>
-      </tr>
-      <tr>
-        <td id="L1195" class="blob-num js-line-number" data-line-number="1195"></td>
-        <td id="LC1195" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1196" class="blob-num js-line-number" data-line-number="1196"></td>
-        <td id="LC1196" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1197" class="blob-num js-line-number" data-line-number="1197"></td>
-        <td id="LC1197" class="blob-code js-file-line"><span class="pl-st">int</span> <span class="pl-en">mpc_parse_pipe</span>(<span class="pl-s">const</span> <span class="pl-st">char</span> *filename, <span class="pl-s3">FILE</span> *pipe, <span class="pl-s3">mpc_parser_t</span> *p, <span class="pl-s3">mpc_result_t</span> *r) {</td>
-      </tr>
-      <tr>
-        <td id="L1198" class="blob-num js-line-number" data-line-number="1198"></td>
-        <td id="LC1198" class="blob-code js-file-line">  <span class="pl-st">int</span> x;</td>
-      </tr>
-      <tr>
-        <td id="L1199" class="blob-num js-line-number" data-line-number="1199"></td>
-        <td id="LC1199" class="blob-code js-file-line">  <span class="pl-s3">mpc_input_t</span> *i = <span class="pl-s3">mpc_input_new_pipe</span>(filename, <span class="pl-s3">pipe</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1200" class="blob-num js-line-number" data-line-number="1200"></td>
-        <td id="LC1200" class="blob-code js-file-line">  x = <span class="pl-s3">mpc_parse_input</span>(i, p, r);</td>
-      </tr>
-      <tr>
-        <td id="L1201" class="blob-num js-line-number" data-line-number="1201"></td>
-        <td id="LC1201" class="blob-code js-file-line">  <span class="pl-s3">mpc_input_delete</span>(i);</td>
-      </tr>
-      <tr>
-        <td id="L1202" class="blob-num js-line-number" data-line-number="1202"></td>
-        <td id="LC1202" class="blob-code js-file-line">  <span class="pl-k">return</span> x;</td>
-      </tr>
-      <tr>
-        <td id="L1203" class="blob-num js-line-number" data-line-number="1203"></td>
-        <td id="LC1203" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1204" class="blob-num js-line-number" data-line-number="1204"></td>
-        <td id="LC1204" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1205" class="blob-num js-line-number" data-line-number="1205"></td>
-        <td id="LC1205" class="blob-code js-file-line"><span class="pl-st">int</span> <span class="pl-en">mpc_parse_contents</span>(<span class="pl-s">const</span> <span class="pl-st">char</span> *filename, <span class="pl-s3">mpc_parser_t</span> *p, <span class="pl-s3">mpc_result_t</span> *r) {</td>
-      </tr>
-      <tr>
-        <td id="L1206" class="blob-num js-line-number" data-line-number="1206"></td>
-        <td id="LC1206" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1207" class="blob-num js-line-number" data-line-number="1207"></td>
-        <td id="LC1207" class="blob-code js-file-line">  <span class="pl-s3">FILE</span> *f = <span class="pl-s3">fopen</span>(filename, <span class="pl-s1"><span class="pl-pds">&quot;</span>rb<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L1208" class="blob-num js-line-number" data-line-number="1208"></td>
-        <td id="LC1208" class="blob-code js-file-line">  <span class="pl-st">int</span> res;</td>
-      </tr>
-      <tr>
-        <td id="L1209" class="blob-num js-line-number" data-line-number="1209"></td>
-        <td id="LC1209" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1210" class="blob-num js-line-number" data-line-number="1210"></td>
-        <td id="LC1210" class="blob-code js-file-line">  <span class="pl-k">if</span> (f == <span class="pl-c1">NULL</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L1211" class="blob-num js-line-number" data-line-number="1211"></td>
-        <td id="LC1211" class="blob-code js-file-line">    r-&gt;output = <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L1212" class="blob-num js-line-number" data-line-number="1212"></td>
-        <td id="LC1212" class="blob-code js-file-line">    r-&gt;error = <span class="pl-s3">mpc_err_fail</span>(filename, <span class="pl-s3">mpc_state_new</span>(), <span class="pl-s1"><span class="pl-pds">&quot;</span>Unable to open file!<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L1213" class="blob-num js-line-number" data-line-number="1213"></td>
-        <td id="LC1213" class="blob-code js-file-line">    <span class="pl-k">return</span> <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L1214" class="blob-num js-line-number" data-line-number="1214"></td>
-        <td id="LC1214" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L1215" class="blob-num js-line-number" data-line-number="1215"></td>
-        <td id="LC1215" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1216" class="blob-num js-line-number" data-line-number="1216"></td>
-        <td id="LC1216" class="blob-code js-file-line">  res = <span class="pl-s3">mpc_parse_file</span>(filename, f, p, r);</td>
-      </tr>
-      <tr>
-        <td id="L1217" class="blob-num js-line-number" data-line-number="1217"></td>
-        <td id="LC1217" class="blob-code js-file-line">  <span class="pl-s3">fclose</span>(f);</td>
-      </tr>
-      <tr>
-        <td id="L1218" class="blob-num js-line-number" data-line-number="1218"></td>
-        <td id="LC1218" class="blob-code js-file-line">  <span class="pl-k">return</span> res;</td>
-      </tr>
-      <tr>
-        <td id="L1219" class="blob-num js-line-number" data-line-number="1219"></td>
-        <td id="LC1219" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1220" class="blob-num js-line-number" data-line-number="1220"></td>
-        <td id="LC1220" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1221" class="blob-num js-line-number" data-line-number="1221"></td>
-        <td id="LC1221" class="blob-code js-file-line"><span class="pl-c">/*</span></td>
-      </tr>
-      <tr>
-        <td id="L1222" class="blob-num js-line-number" data-line-number="1222"></td>
-        <td id="LC1222" class="blob-code js-file-line"><span class="pl-c">** Building a Parser</span></td>
-      </tr>
-      <tr>
-        <td id="L1223" class="blob-num js-line-number" data-line-number="1223"></td>
-        <td id="LC1223" class="blob-code js-file-line"><span class="pl-c">*/</span></td>
-      </tr>
-      <tr>
-        <td id="L1224" class="blob-num js-line-number" data-line-number="1224"></td>
-        <td id="LC1224" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1225" class="blob-num js-line-number" data-line-number="1225"></td>
-        <td id="LC1225" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">void</span> <span class="pl-en">mpc_undefine_unretained</span>(<span class="pl-s3">mpc_parser_t</span> *p, <span class="pl-st">int</span> force);</td>
-      </tr>
-      <tr>
-        <td id="L1226" class="blob-num js-line-number" data-line-number="1226"></td>
-        <td id="LC1226" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1227" class="blob-num js-line-number" data-line-number="1227"></td>
-        <td id="LC1227" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">void</span> <span class="pl-en">mpc_undefine_or</span>(<span class="pl-s3">mpc_parser_t</span> *p) {</td>
-      </tr>
-      <tr>
-        <td id="L1228" class="blob-num js-line-number" data-line-number="1228"></td>
-        <td id="LC1228" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1229" class="blob-num js-line-number" data-line-number="1229"></td>
-        <td id="LC1229" class="blob-code js-file-line">  <span class="pl-st">int</span> i;</td>
-      </tr>
-      <tr>
-        <td id="L1230" class="blob-num js-line-number" data-line-number="1230"></td>
-        <td id="LC1230" class="blob-code js-file-line">  <span class="pl-k">for</span> (i = <span class="pl-c1">0</span>; i &lt; p-&gt;data.<span class="pl-vo">or</span>.<span class="pl-vo">n</span>; i++) {</td>
-      </tr>
-      <tr>
-        <td id="L1231" class="blob-num js-line-number" data-line-number="1231"></td>
-        <td id="LC1231" class="blob-code js-file-line">    <span class="pl-s3">mpc_undefine_unretained</span>(p-&gt;data.<span class="pl-vo">or</span>.<span class="pl-vo">xs</span>[i], <span class="pl-c1">0</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1232" class="blob-num js-line-number" data-line-number="1232"></td>
-        <td id="LC1232" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L1233" class="blob-num js-line-number" data-line-number="1233"></td>
-        <td id="LC1233" class="blob-code js-file-line">  <span class="pl-s3">free</span>(p-&gt;data.<span class="pl-vo">or</span>.<span class="pl-vo">xs</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1234" class="blob-num js-line-number" data-line-number="1234"></td>
-        <td id="LC1234" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1235" class="blob-num js-line-number" data-line-number="1235"></td>
-        <td id="LC1235" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1236" class="blob-num js-line-number" data-line-number="1236"></td>
-        <td id="LC1236" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1237" class="blob-num js-line-number" data-line-number="1237"></td>
-        <td id="LC1237" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">void</span> <span class="pl-en">mpc_undefine_and</span>(<span class="pl-s3">mpc_parser_t</span> *p) {</td>
-      </tr>
-      <tr>
-        <td id="L1238" class="blob-num js-line-number" data-line-number="1238"></td>
-        <td id="LC1238" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1239" class="blob-num js-line-number" data-line-number="1239"></td>
-        <td id="LC1239" class="blob-code js-file-line">  <span class="pl-st">int</span> i;</td>
-      </tr>
-      <tr>
-        <td id="L1240" class="blob-num js-line-number" data-line-number="1240"></td>
-        <td id="LC1240" class="blob-code js-file-line">  <span class="pl-k">for</span> (i = <span class="pl-c1">0</span>; i &lt; p-&gt;data.<span class="pl-vo">and</span>.<span class="pl-vo">n</span>; i++) {</td>
-      </tr>
-      <tr>
-        <td id="L1241" class="blob-num js-line-number" data-line-number="1241"></td>
-        <td id="LC1241" class="blob-code js-file-line">    <span class="pl-s3">mpc_undefine_unretained</span>(p-&gt;data.<span class="pl-vo">and</span>.<span class="pl-vo">xs</span>[i], <span class="pl-c1">0</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1242" class="blob-num js-line-number" data-line-number="1242"></td>
-        <td id="LC1242" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L1243" class="blob-num js-line-number" data-line-number="1243"></td>
-        <td id="LC1243" class="blob-code js-file-line">  <span class="pl-s3">free</span>(p-&gt;data.<span class="pl-vo">and</span>.<span class="pl-vo">xs</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1244" class="blob-num js-line-number" data-line-number="1244"></td>
-        <td id="LC1244" class="blob-code js-file-line">  <span class="pl-s3">free</span>(p-&gt;data.<span class="pl-vo">and</span>.<span class="pl-vo">dxs</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1245" class="blob-num js-line-number" data-line-number="1245"></td>
-        <td id="LC1245" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1246" class="blob-num js-line-number" data-line-number="1246"></td>
-        <td id="LC1246" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1247" class="blob-num js-line-number" data-line-number="1247"></td>
-        <td id="LC1247" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1248" class="blob-num js-line-number" data-line-number="1248"></td>
-        <td id="LC1248" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">void</span> <span class="pl-en">mpc_undefine_unretained</span>(<span class="pl-s3">mpc_parser_t</span> *p, <span class="pl-st">int</span> force) {</td>
-      </tr>
-      <tr>
-        <td id="L1249" class="blob-num js-line-number" data-line-number="1249"></td>
-        <td id="LC1249" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1250" class="blob-num js-line-number" data-line-number="1250"></td>
-        <td id="LC1250" class="blob-code js-file-line">  <span class="pl-k">if</span> (p-&gt;retained &amp;&amp; !force) { <span class="pl-k">return</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L1251" class="blob-num js-line-number" data-line-number="1251"></td>
-        <td id="LC1251" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1252" class="blob-num js-line-number" data-line-number="1252"></td>
-        <td id="LC1252" class="blob-code js-file-line">  <span class="pl-k">switch</span> (p-&gt;type) {</td>
-      </tr>
-      <tr>
-        <td id="L1253" class="blob-num js-line-number" data-line-number="1253"></td>
-        <td id="LC1253" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L1254" class="blob-num js-line-number" data-line-number="1254"></td>
-        <td id="LC1254" class="blob-code js-file-line">    <span class="pl-k">case</span> MPC_TYPE_FAIL: <span class="pl-s3">free</span>(p-&gt;data.<span class="pl-vo">fail</span>.<span class="pl-vo">m</span>); <span class="pl-k">break</span>;</td>
-      </tr>
-      <tr>
-        <td id="L1255" class="blob-num js-line-number" data-line-number="1255"></td>
-        <td id="LC1255" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L1256" class="blob-num js-line-number" data-line-number="1256"></td>
-        <td id="LC1256" class="blob-code js-file-line">    <span class="pl-k">case</span> MPC_TYPE_ONEOF: </td>
-      </tr>
-      <tr>
-        <td id="L1257" class="blob-num js-line-number" data-line-number="1257"></td>
-        <td id="LC1257" class="blob-code js-file-line">    <span class="pl-k">case</span> MPC_TYPE_NONEOF:</td>
-      </tr>
-      <tr>
-        <td id="L1258" class="blob-num js-line-number" data-line-number="1258"></td>
-        <td id="LC1258" class="blob-code js-file-line">    <span class="pl-k">case</span> MPC_TYPE_STRING:</td>
-      </tr>
-      <tr>
-        <td id="L1259" class="blob-num js-line-number" data-line-number="1259"></td>
-        <td id="LC1259" class="blob-code js-file-line">      <span class="pl-s3">free</span>(p-&gt;data.<span class="pl-vo">string</span>.<span class="pl-vo">x</span>); </td>
-      </tr>
-      <tr>
-        <td id="L1260" class="blob-num js-line-number" data-line-number="1260"></td>
-        <td id="LC1260" class="blob-code js-file-line">      <span class="pl-k">break</span>;</td>
-      </tr>
-      <tr>
-        <td id="L1261" class="blob-num js-line-number" data-line-number="1261"></td>
-        <td id="LC1261" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L1262" class="blob-num js-line-number" data-line-number="1262"></td>
-        <td id="LC1262" class="blob-code js-file-line">    <span class="pl-k">case</span> MPC_TYPE_APPLY:    <span class="pl-s3">mpc_undefine_unretained</span>(p-&gt;data.<span class="pl-vo">apply</span>.<span class="pl-vo">x</span>, <span class="pl-c1">0</span>);    <span class="pl-k">break</span>;</td>
-      </tr>
-      <tr>
-        <td id="L1263" class="blob-num js-line-number" data-line-number="1263"></td>
-        <td id="LC1263" class="blob-code js-file-line">    <span class="pl-k">case</span> MPC_TYPE_APPLY_TO: <span class="pl-s3">mpc_undefine_unretained</span>(p-&gt;data.<span class="pl-vo">apply_to</span>.<span class="pl-vo">x</span>, <span class="pl-c1">0</span>); <span class="pl-k">break</span>;</td>
-      </tr>
-      <tr>
-        <td id="L1264" class="blob-num js-line-number" data-line-number="1264"></td>
-        <td id="LC1264" class="blob-code js-file-line">    <span class="pl-k">case</span> MPC_TYPE_PREDICT:  <span class="pl-s3">mpc_undefine_unretained</span>(p-&gt;data.<span class="pl-vo">predict</span>.<span class="pl-vo">x</span>, <span class="pl-c1">0</span>);  <span class="pl-k">break</span>;</td>
-      </tr>
-      <tr>
-        <td id="L1265" class="blob-num js-line-number" data-line-number="1265"></td>
-        <td id="LC1265" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L1266" class="blob-num js-line-number" data-line-number="1266"></td>
-        <td id="LC1266" class="blob-code js-file-line">    <span class="pl-k">case</span> MPC_TYPE_MAYBE:</td>
-      </tr>
-      <tr>
-        <td id="L1267" class="blob-num js-line-number" data-line-number="1267"></td>
-        <td id="LC1267" class="blob-code js-file-line">    <span class="pl-k">case</span> MPC_TYPE_NOT:</td>
-      </tr>
-      <tr>
-        <td id="L1268" class="blob-num js-line-number" data-line-number="1268"></td>
-        <td id="LC1268" class="blob-code js-file-line">      <span class="pl-s3">mpc_undefine_unretained</span>(p-&gt;data.<span class="pl-vo">not</span>.<span class="pl-vo">x</span>, <span class="pl-c1">0</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1269" class="blob-num js-line-number" data-line-number="1269"></td>
-        <td id="LC1269" class="blob-code js-file-line">      <span class="pl-k">break</span>;</td>
-      </tr>
-      <tr>
-        <td id="L1270" class="blob-num js-line-number" data-line-number="1270"></td>
-        <td id="LC1270" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L1271" class="blob-num js-line-number" data-line-number="1271"></td>
-        <td id="LC1271" class="blob-code js-file-line">    <span class="pl-k">case</span> MPC_TYPE_EXPECT:</td>
-      </tr>
-      <tr>
-        <td id="L1272" class="blob-num js-line-number" data-line-number="1272"></td>
-        <td id="LC1272" class="blob-code js-file-line">      <span class="pl-s3">mpc_undefine_unretained</span>(p-&gt;data.<span class="pl-vo">expect</span>.<span class="pl-vo">x</span>, <span class="pl-c1">0</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1273" class="blob-num js-line-number" data-line-number="1273"></td>
-        <td id="LC1273" class="blob-code js-file-line">      <span class="pl-s3">free</span>(p-&gt;data.<span class="pl-vo">expect</span>.<span class="pl-vo">m</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1274" class="blob-num js-line-number" data-line-number="1274"></td>
-        <td id="LC1274" class="blob-code js-file-line">      <span class="pl-k">break</span>;</td>
-      </tr>
-      <tr>
-        <td id="L1275" class="blob-num js-line-number" data-line-number="1275"></td>
-        <td id="LC1275" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L1276" class="blob-num js-line-number" data-line-number="1276"></td>
-        <td id="LC1276" class="blob-code js-file-line">    <span class="pl-k">case</span> MPC_TYPE_MANY:</td>
-      </tr>
-      <tr>
-        <td id="L1277" class="blob-num js-line-number" data-line-number="1277"></td>
-        <td id="LC1277" class="blob-code js-file-line">    <span class="pl-k">case</span> MPC_TYPE_MANY1:</td>
-      </tr>
-      <tr>
-        <td id="L1278" class="blob-num js-line-number" data-line-number="1278"></td>
-        <td id="LC1278" class="blob-code js-file-line">    <span class="pl-k">case</span> MPC_TYPE_COUNT:</td>
-      </tr>
-      <tr>
-        <td id="L1279" class="blob-num js-line-number" data-line-number="1279"></td>
-        <td id="LC1279" class="blob-code js-file-line">      <span class="pl-s3">mpc_undefine_unretained</span>(p-&gt;data.<span class="pl-vo">repeat</span>.<span class="pl-vo">x</span>, <span class="pl-c1">0</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1280" class="blob-num js-line-number" data-line-number="1280"></td>
-        <td id="LC1280" class="blob-code js-file-line">      <span class="pl-k">break</span>;</td>
-      </tr>
-      <tr>
-        <td id="L1281" class="blob-num js-line-number" data-line-number="1281"></td>
-        <td id="LC1281" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L1282" class="blob-num js-line-number" data-line-number="1282"></td>
-        <td id="LC1282" class="blob-code js-file-line">    <span class="pl-k">case</span> MPC_TYPE_OR:  <span class="pl-s3">mpc_undefine_or</span>(p);  <span class="pl-k">break</span>;</td>
-      </tr>
-      <tr>
-        <td id="L1283" class="blob-num js-line-number" data-line-number="1283"></td>
-        <td id="LC1283" class="blob-code js-file-line">    <span class="pl-k">case</span> MPC_TYPE_AND: <span class="pl-s3">mpc_undefine_and</span>(p); <span class="pl-k">break</span>;</td>
-      </tr>
-      <tr>
-        <td id="L1284" class="blob-num js-line-number" data-line-number="1284"></td>
-        <td id="LC1284" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L1285" class="blob-num js-line-number" data-line-number="1285"></td>
-        <td id="LC1285" class="blob-code js-file-line">    <span class="pl-k">default</span>: <span class="pl-k">break</span>;</td>
-      </tr>
-      <tr>
-        <td id="L1286" class="blob-num js-line-number" data-line-number="1286"></td>
-        <td id="LC1286" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L1287" class="blob-num js-line-number" data-line-number="1287"></td>
-        <td id="LC1287" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1288" class="blob-num js-line-number" data-line-number="1288"></td>
-        <td id="LC1288" class="blob-code js-file-line">  <span class="pl-k">if</span> (!force) {</td>
-      </tr>
-      <tr>
-        <td id="L1289" class="blob-num js-line-number" data-line-number="1289"></td>
-        <td id="LC1289" class="blob-code js-file-line">    <span class="pl-s3">free</span>(p-&gt;name);</td>
-      </tr>
-      <tr>
-        <td id="L1290" class="blob-num js-line-number" data-line-number="1290"></td>
-        <td id="LC1290" class="blob-code js-file-line">    <span class="pl-s3">free</span>(p);</td>
-      </tr>
-      <tr>
-        <td id="L1291" class="blob-num js-line-number" data-line-number="1291"></td>
-        <td id="LC1291" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L1292" class="blob-num js-line-number" data-line-number="1292"></td>
-        <td id="LC1292" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1293" class="blob-num js-line-number" data-line-number="1293"></td>
-        <td id="LC1293" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1294" class="blob-num js-line-number" data-line-number="1294"></td>
-        <td id="LC1294" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1295" class="blob-num js-line-number" data-line-number="1295"></td>
-        <td id="LC1295" class="blob-code js-file-line"><span class="pl-st">void</span> <span class="pl-en">mpc_delete</span>(<span class="pl-s3">mpc_parser_t</span> *p) {</td>
-      </tr>
-      <tr>
-        <td id="L1296" class="blob-num js-line-number" data-line-number="1296"></td>
-        <td id="LC1296" class="blob-code js-file-line">  <span class="pl-k">if</span> (p-&gt;retained) {</td>
-      </tr>
-      <tr>
-        <td id="L1297" class="blob-num js-line-number" data-line-number="1297"></td>
-        <td id="LC1297" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1298" class="blob-num js-line-number" data-line-number="1298"></td>
-        <td id="LC1298" class="blob-code js-file-line">    <span class="pl-k">if</span> (p-&gt;type != MPC_TYPE_UNDEFINED) {</td>
-      </tr>
-      <tr>
-        <td id="L1299" class="blob-num js-line-number" data-line-number="1299"></td>
-        <td id="LC1299" class="blob-code js-file-line">      <span class="pl-s3">mpc_undefine_unretained</span>(p, <span class="pl-c1">0</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1300" class="blob-num js-line-number" data-line-number="1300"></td>
-        <td id="LC1300" class="blob-code js-file-line">    } </td>
-      </tr>
-      <tr>
-        <td id="L1301" class="blob-num js-line-number" data-line-number="1301"></td>
-        <td id="LC1301" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L1302" class="blob-num js-line-number" data-line-number="1302"></td>
-        <td id="LC1302" class="blob-code js-file-line">    <span class="pl-s3">free</span>(p-&gt;name);</td>
-      </tr>
-      <tr>
-        <td id="L1303" class="blob-num js-line-number" data-line-number="1303"></td>
-        <td id="LC1303" class="blob-code js-file-line">    <span class="pl-s3">free</span>(p);</td>
-      </tr>
-      <tr>
-        <td id="L1304" class="blob-num js-line-number" data-line-number="1304"></td>
-        <td id="LC1304" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1305" class="blob-num js-line-number" data-line-number="1305"></td>
-        <td id="LC1305" class="blob-code js-file-line">  } <span class="pl-k">else</span> {</td>
-      </tr>
-      <tr>
-        <td id="L1306" class="blob-num js-line-number" data-line-number="1306"></td>
-        <td id="LC1306" class="blob-code js-file-line">    <span class="pl-s3">mpc_undefine_unretained</span>(p, <span class="pl-c1">0</span>);  </td>
-      </tr>
-      <tr>
-        <td id="L1307" class="blob-num js-line-number" data-line-number="1307"></td>
-        <td id="LC1307" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L1308" class="blob-num js-line-number" data-line-number="1308"></td>
-        <td id="LC1308" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1309" class="blob-num js-line-number" data-line-number="1309"></td>
-        <td id="LC1309" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1310" class="blob-num js-line-number" data-line-number="1310"></td>
-        <td id="LC1310" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">void</span> <span class="pl-en">mpc_soft_delete</span>(<span class="pl-s3">mpc_val_t</span> *x) {</td>
-      </tr>
-      <tr>
-        <td id="L1311" class="blob-num js-line-number" data-line-number="1311"></td>
-        <td id="LC1311" class="blob-code js-file-line">  <span class="pl-s3">mpc_undefine_unretained</span>(x, <span class="pl-c1">0</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1312" class="blob-num js-line-number" data-line-number="1312"></td>
-        <td id="LC1312" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1313" class="blob-num js-line-number" data-line-number="1313"></td>
-        <td id="LC1313" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1314" class="blob-num js-line-number" data-line-number="1314"></td>
-        <td id="LC1314" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_undefined</span>(<span class="pl-st">void</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L1315" class="blob-num js-line-number" data-line-number="1315"></td>
-        <td id="LC1315" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-s3">calloc</span>(<span class="pl-c1">1</span>, <span class="pl-k">sizeof</span>(<span class="pl-s3">mpc_parser_t</span>));</td>
-      </tr>
-      <tr>
-        <td id="L1316" class="blob-num js-line-number" data-line-number="1316"></td>
-        <td id="LC1316" class="blob-code js-file-line">  p-&gt;retained = <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L1317" class="blob-num js-line-number" data-line-number="1317"></td>
-        <td id="LC1317" class="blob-code js-file-line">  p-&gt;type = MPC_TYPE_UNDEFINED;</td>
-      </tr>
-      <tr>
-        <td id="L1318" class="blob-num js-line-number" data-line-number="1318"></td>
-        <td id="LC1318" class="blob-code js-file-line">  p-&gt;name = <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L1319" class="blob-num js-line-number" data-line-number="1319"></td>
-        <td id="LC1319" class="blob-code js-file-line">  <span class="pl-k">return</span> p;</td>
-      </tr>
-      <tr>
-        <td id="L1320" class="blob-num js-line-number" data-line-number="1320"></td>
-        <td id="LC1320" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1321" class="blob-num js-line-number" data-line-number="1321"></td>
-        <td id="LC1321" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1322" class="blob-num js-line-number" data-line-number="1322"></td>
-        <td id="LC1322" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_new</span>(<span class="pl-s">const</span> <span class="pl-st">char</span> *name) {</td>
-      </tr>
-      <tr>
-        <td id="L1323" class="blob-num js-line-number" data-line-number="1323"></td>
-        <td id="LC1323" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-s3">mpc_undefined</span>();</td>
-      </tr>
-      <tr>
-        <td id="L1324" class="blob-num js-line-number" data-line-number="1324"></td>
-        <td id="LC1324" class="blob-code js-file-line">  p-&gt;retained = <span class="pl-c1">1</span>;</td>
-      </tr>
-      <tr>
-        <td id="L1325" class="blob-num js-line-number" data-line-number="1325"></td>
-        <td id="LC1325" class="blob-code js-file-line">  p-&gt;name = <span class="pl-s3">realloc</span>(p-&gt;name, <span class="pl-s3">strlen</span>(name) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1326" class="blob-num js-line-number" data-line-number="1326"></td>
-        <td id="LC1326" class="blob-code js-file-line">  <span class="pl-s3">strcpy</span>(p-&gt;name, name);</td>
-      </tr>
-      <tr>
-        <td id="L1327" class="blob-num js-line-number" data-line-number="1327"></td>
-        <td id="LC1327" class="blob-code js-file-line">  <span class="pl-k">return</span> p;</td>
-      </tr>
-      <tr>
-        <td id="L1328" class="blob-num js-line-number" data-line-number="1328"></td>
-        <td id="LC1328" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1329" class="blob-num js-line-number" data-line-number="1329"></td>
-        <td id="LC1329" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1330" class="blob-num js-line-number" data-line-number="1330"></td>
-        <td id="LC1330" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_undefine</span>(<span class="pl-s3">mpc_parser_t</span> *p) {</td>
-      </tr>
-      <tr>
-        <td id="L1331" class="blob-num js-line-number" data-line-number="1331"></td>
-        <td id="LC1331" class="blob-code js-file-line">  <span class="pl-s3">mpc_undefine_unretained</span>(p, <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1332" class="blob-num js-line-number" data-line-number="1332"></td>
-        <td id="LC1332" class="blob-code js-file-line">  p-&gt;type = MPC_TYPE_UNDEFINED;</td>
-      </tr>
-      <tr>
-        <td id="L1333" class="blob-num js-line-number" data-line-number="1333"></td>
-        <td id="LC1333" class="blob-code js-file-line">  <span class="pl-k">return</span> p;</td>
-      </tr>
-      <tr>
-        <td id="L1334" class="blob-num js-line-number" data-line-number="1334"></td>
-        <td id="LC1334" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1335" class="blob-num js-line-number" data-line-number="1335"></td>
-        <td id="LC1335" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1336" class="blob-num js-line-number" data-line-number="1336"></td>
-        <td id="LC1336" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_define</span>(<span class="pl-s3">mpc_parser_t</span> *p, <span class="pl-s3">mpc_parser_t</span> *a) {</td>
-      </tr>
-      <tr>
-        <td id="L1337" class="blob-num js-line-number" data-line-number="1337"></td>
-        <td id="LC1337" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1338" class="blob-num js-line-number" data-line-number="1338"></td>
-        <td id="LC1338" class="blob-code js-file-line">  <span class="pl-k">if</span> (p-&gt;retained) {</td>
-      </tr>
-      <tr>
-        <td id="L1339" class="blob-num js-line-number" data-line-number="1339"></td>
-        <td id="LC1339" class="blob-code js-file-line">    p-&gt;type = a-&gt;type;</td>
-      </tr>
-      <tr>
-        <td id="L1340" class="blob-num js-line-number" data-line-number="1340"></td>
-        <td id="LC1340" class="blob-code js-file-line">    p-&gt;data = a-&gt;data;</td>
-      </tr>
-      <tr>
-        <td id="L1341" class="blob-num js-line-number" data-line-number="1341"></td>
-        <td id="LC1341" class="blob-code js-file-line">  } <span class="pl-k">else</span> {</td>
-      </tr>
-      <tr>
-        <td id="L1342" class="blob-num js-line-number" data-line-number="1342"></td>
-        <td id="LC1342" class="blob-code js-file-line">    <span class="pl-s3">mpc_parser_t</span> *a2 = <span class="pl-s3">mpc_failf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>Attempt to assign to Unretained Parser!<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L1343" class="blob-num js-line-number" data-line-number="1343"></td>
-        <td id="LC1343" class="blob-code js-file-line">    p-&gt;type = a2-&gt;type;</td>
-      </tr>
-      <tr>
-        <td id="L1344" class="blob-num js-line-number" data-line-number="1344"></td>
-        <td id="LC1344" class="blob-code js-file-line">    p-&gt;data = a2-&gt;data;</td>
-      </tr>
-      <tr>
-        <td id="L1345" class="blob-num js-line-number" data-line-number="1345"></td>
-        <td id="LC1345" class="blob-code js-file-line">    <span class="pl-s3">free</span>(a2);</td>
-      </tr>
-      <tr>
-        <td id="L1346" class="blob-num js-line-number" data-line-number="1346"></td>
-        <td id="LC1346" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L1347" class="blob-num js-line-number" data-line-number="1347"></td>
-        <td id="LC1347" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1348" class="blob-num js-line-number" data-line-number="1348"></td>
-        <td id="LC1348" class="blob-code js-file-line">  <span class="pl-s3">free</span>(a);</td>
-      </tr>
-      <tr>
-        <td id="L1349" class="blob-num js-line-number" data-line-number="1349"></td>
-        <td id="LC1349" class="blob-code js-file-line">  <span class="pl-k">return</span> p;  </td>
-      </tr>
-      <tr>
-        <td id="L1350" class="blob-num js-line-number" data-line-number="1350"></td>
-        <td id="LC1350" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1351" class="blob-num js-line-number" data-line-number="1351"></td>
-        <td id="LC1351" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1352" class="blob-num js-line-number" data-line-number="1352"></td>
-        <td id="LC1352" class="blob-code js-file-line"><span class="pl-st">void</span> <span class="pl-en">mpc_cleanup</span>(<span class="pl-st">int</span> n, ...) {</td>
-      </tr>
-      <tr>
-        <td id="L1353" class="blob-num js-line-number" data-line-number="1353"></td>
-        <td id="LC1353" class="blob-code js-file-line">  <span class="pl-st">int</span> i;</td>
-      </tr>
-      <tr>
-        <td id="L1354" class="blob-num js-line-number" data-line-number="1354"></td>
-        <td id="LC1354" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> **list = <span class="pl-s3">malloc</span>(<span class="pl-k">sizeof</span>(<span class="pl-s3">mpc_parser_t</span>*) * n);</td>
-      </tr>
-      <tr>
-        <td id="L1355" class="blob-num js-line-number" data-line-number="1355"></td>
-        <td id="LC1355" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1356" class="blob-num js-line-number" data-line-number="1356"></td>
-        <td id="LC1356" class="blob-code js-file-line">  <span class="pl-s3">va_list</span> va;</td>
-      </tr>
-      <tr>
-        <td id="L1357" class="blob-num js-line-number" data-line-number="1357"></td>
-        <td id="LC1357" class="blob-code js-file-line">  <span class="pl-s3">va_start</span>(va, n);</td>
-      </tr>
-      <tr>
-        <td id="L1358" class="blob-num js-line-number" data-line-number="1358"></td>
-        <td id="LC1358" class="blob-code js-file-line">  <span class="pl-k">for</span> (i = <span class="pl-c1">0</span>; i &lt; n; i++) { list[i] = <span class="pl-s3">va_arg</span>(va, <span class="pl-s3">mpc_parser_t</span>*); }</td>
-      </tr>
-      <tr>
-        <td id="L1359" class="blob-num js-line-number" data-line-number="1359"></td>
-        <td id="LC1359" class="blob-code js-file-line">  <span class="pl-k">for</span> (i = <span class="pl-c1">0</span>; i &lt; n; i++) { <span class="pl-s3">mpc_undefine</span>(list[i]); }</td>
-      </tr>
-      <tr>
-        <td id="L1360" class="blob-num js-line-number" data-line-number="1360"></td>
-        <td id="LC1360" class="blob-code js-file-line">  <span class="pl-k">for</span> (i = <span class="pl-c1">0</span>; i &lt; n; i++) { <span class="pl-s3">mpc_delete</span>(list[i]); }  </td>
-      </tr>
-      <tr>
-        <td id="L1361" class="blob-num js-line-number" data-line-number="1361"></td>
-        <td id="LC1361" class="blob-code js-file-line">  <span class="pl-s3">va_end</span>(va);  </td>
-      </tr>
-      <tr>
-        <td id="L1362" class="blob-num js-line-number" data-line-number="1362"></td>
-        <td id="LC1362" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1363" class="blob-num js-line-number" data-line-number="1363"></td>
-        <td id="LC1363" class="blob-code js-file-line">  <span class="pl-s3">free</span>(list);</td>
-      </tr>
-      <tr>
-        <td id="L1364" class="blob-num js-line-number" data-line-number="1364"></td>
-        <td id="LC1364" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1365" class="blob-num js-line-number" data-line-number="1365"></td>
-        <td id="LC1365" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1366" class="blob-num js-line-number" data-line-number="1366"></td>
-        <td id="LC1366" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_pass</span>(<span class="pl-st">void</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L1367" class="blob-num js-line-number" data-line-number="1367"></td>
-        <td id="LC1367" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-s3">mpc_undefined</span>();</td>
-      </tr>
-      <tr>
-        <td id="L1368" class="blob-num js-line-number" data-line-number="1368"></td>
-        <td id="LC1368" class="blob-code js-file-line">  p-&gt;type = MPC_TYPE_PASS;</td>
-      </tr>
-      <tr>
-        <td id="L1369" class="blob-num js-line-number" data-line-number="1369"></td>
-        <td id="LC1369" class="blob-code js-file-line">  <span class="pl-k">return</span> p;</td>
-      </tr>
-      <tr>
-        <td id="L1370" class="blob-num js-line-number" data-line-number="1370"></td>
-        <td id="LC1370" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1371" class="blob-num js-line-number" data-line-number="1371"></td>
-        <td id="LC1371" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1372" class="blob-num js-line-number" data-line-number="1372"></td>
-        <td id="LC1372" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_fail</span>(<span class="pl-s">const</span> <span class="pl-st">char</span> *m) {</td>
-      </tr>
-      <tr>
-        <td id="L1373" class="blob-num js-line-number" data-line-number="1373"></td>
-        <td id="LC1373" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-s3">mpc_undefined</span>();</td>
-      </tr>
-      <tr>
-        <td id="L1374" class="blob-num js-line-number" data-line-number="1374"></td>
-        <td id="LC1374" class="blob-code js-file-line">  p-&gt;type = MPC_TYPE_FAIL;</td>
-      </tr>
-      <tr>
-        <td id="L1375" class="blob-num js-line-number" data-line-number="1375"></td>
-        <td id="LC1375" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">fail</span>.<span class="pl-vo">m</span> = <span class="pl-s3">malloc</span>(<span class="pl-s3">strlen</span>(m) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1376" class="blob-num js-line-number" data-line-number="1376"></td>
-        <td id="LC1376" class="blob-code js-file-line">  <span class="pl-s3">strcpy</span>(p-&gt;data.<span class="pl-vo">fail</span>.<span class="pl-vo">m</span>, m);</td>
-      </tr>
-      <tr>
-        <td id="L1377" class="blob-num js-line-number" data-line-number="1377"></td>
-        <td id="LC1377" class="blob-code js-file-line">  <span class="pl-k">return</span> p;</td>
-      </tr>
-      <tr>
-        <td id="L1378" class="blob-num js-line-number" data-line-number="1378"></td>
-        <td id="LC1378" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1379" class="blob-num js-line-number" data-line-number="1379"></td>
-        <td id="LC1379" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1380" class="blob-num js-line-number" data-line-number="1380"></td>
-        <td id="LC1380" class="blob-code js-file-line"><span class="pl-c">/*</span></td>
-      </tr>
-      <tr>
-        <td id="L1381" class="blob-num js-line-number" data-line-number="1381"></td>
-        <td id="LC1381" class="blob-code js-file-line"><span class="pl-c">** As `snprintf` is not ANSI standard this </span></td>
-      </tr>
-      <tr>
-        <td id="L1382" class="blob-num js-line-number" data-line-number="1382"></td>
-        <td id="LC1382" class="blob-code js-file-line"><span class="pl-c">** function `mpc_failf` should be considered</span></td>
-      </tr>
-      <tr>
-        <td id="L1383" class="blob-num js-line-number" data-line-number="1383"></td>
-        <td id="LC1383" class="blob-code js-file-line"><span class="pl-c">** unsafe.</span></td>
-      </tr>
-      <tr>
-        <td id="L1384" class="blob-num js-line-number" data-line-number="1384"></td>
-        <td id="LC1384" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L1385" class="blob-num js-line-number" data-line-number="1385"></td>
-        <td id="LC1385" class="blob-code js-file-line"><span class="pl-c">** You have a few options if this is going to be</span></td>
-      </tr>
-      <tr>
-        <td id="L1386" class="blob-num js-line-number" data-line-number="1386"></td>
-        <td id="LC1386" class="blob-code js-file-line"><span class="pl-c">** trouble.</span></td>
-      </tr>
-      <tr>
-        <td id="L1387" class="blob-num js-line-number" data-line-number="1387"></td>
-        <td id="LC1387" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L1388" class="blob-num js-line-number" data-line-number="1388"></td>
-        <td id="LC1388" class="blob-code js-file-line"><span class="pl-c">** - Ensure the format string does not exceed</span></td>
-      </tr>
-      <tr>
-        <td id="L1389" class="blob-num js-line-number" data-line-number="1389"></td>
-        <td id="LC1389" class="blob-code js-file-line"><span class="pl-c">**   the buffer length using precision specifiers</span></td>
-      </tr>
-      <tr>
-        <td id="L1390" class="blob-num js-line-number" data-line-number="1390"></td>
-        <td id="LC1390" class="blob-code js-file-line"><span class="pl-c">**   such as `%.512s`.</span></td>
-      </tr>
-      <tr>
-        <td id="L1391" class="blob-num js-line-number" data-line-number="1391"></td>
-        <td id="LC1391" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L1392" class="blob-num js-line-number" data-line-number="1392"></td>
-        <td id="LC1392" class="blob-code js-file-line"><span class="pl-c">** - Patch this function in your code base to </span></td>
-      </tr>
-      <tr>
-        <td id="L1393" class="blob-num js-line-number" data-line-number="1393"></td>
-        <td id="LC1393" class="blob-code js-file-line"><span class="pl-c">**   use `snprintf` or whatever variant your</span></td>
-      </tr>
-      <tr>
-        <td id="L1394" class="blob-num js-line-number" data-line-number="1394"></td>
-        <td id="LC1394" class="blob-code js-file-line"><span class="pl-c">**   system supports.</span></td>
-      </tr>
-      <tr>
-        <td id="L1395" class="blob-num js-line-number" data-line-number="1395"></td>
-        <td id="LC1395" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L1396" class="blob-num js-line-number" data-line-number="1396"></td>
-        <td id="LC1396" class="blob-code js-file-line"><span class="pl-c">** - Avoid it altogether.</span></td>
-      </tr>
-      <tr>
-        <td id="L1397" class="blob-num js-line-number" data-line-number="1397"></td>
-        <td id="LC1397" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L1398" class="blob-num js-line-number" data-line-number="1398"></td>
-        <td id="LC1398" class="blob-code js-file-line"><span class="pl-c">*/</span></td>
-      </tr>
-      <tr>
-        <td id="L1399" class="blob-num js-line-number" data-line-number="1399"></td>
-        <td id="LC1399" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1400" class="blob-num js-line-number" data-line-number="1400"></td>
-        <td id="LC1400" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_failf</span>(<span class="pl-s">const</span> <span class="pl-st">char</span> *fmt, ...) {</td>
-      </tr>
-      <tr>
-        <td id="L1401" class="blob-num js-line-number" data-line-number="1401"></td>
-        <td id="LC1401" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1402" class="blob-num js-line-number" data-line-number="1402"></td>
-        <td id="LC1402" class="blob-code js-file-line">  <span class="pl-s3">va_list</span> va;</td>
-      </tr>
-      <tr>
-        <td id="L1403" class="blob-num js-line-number" data-line-number="1403"></td>
-        <td id="LC1403" class="blob-code js-file-line">  <span class="pl-st">char</span> *buffer;</td>
-      </tr>
-      <tr>
-        <td id="L1404" class="blob-num js-line-number" data-line-number="1404"></td>
-        <td id="LC1404" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1405" class="blob-num js-line-number" data-line-number="1405"></td>
-        <td id="LC1405" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-s3">mpc_undefined</span>();</td>
-      </tr>
-      <tr>
-        <td id="L1406" class="blob-num js-line-number" data-line-number="1406"></td>
-        <td id="LC1406" class="blob-code js-file-line">  p-&gt;type = MPC_TYPE_FAIL;</td>
-      </tr>
-      <tr>
-        <td id="L1407" class="blob-num js-line-number" data-line-number="1407"></td>
-        <td id="LC1407" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1408" class="blob-num js-line-number" data-line-number="1408"></td>
-        <td id="LC1408" class="blob-code js-file-line">  <span class="pl-s3">va_start</span>(va, fmt);</td>
-      </tr>
-      <tr>
-        <td id="L1409" class="blob-num js-line-number" data-line-number="1409"></td>
-        <td id="LC1409" class="blob-code js-file-line">  buffer = <span class="pl-s3">malloc</span>(<span class="pl-c1">2048</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1410" class="blob-num js-line-number" data-line-number="1410"></td>
-        <td id="LC1410" class="blob-code js-file-line">  <span class="pl-s3">vsprintf</span>(buffer, fmt, va);</td>
-      </tr>
-      <tr>
-        <td id="L1411" class="blob-num js-line-number" data-line-number="1411"></td>
-        <td id="LC1411" class="blob-code js-file-line">  <span class="pl-s3">va_end</span>(va);</td>
-      </tr>
-      <tr>
-        <td id="L1412" class="blob-num js-line-number" data-line-number="1412"></td>
-        <td id="LC1412" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1413" class="blob-num js-line-number" data-line-number="1413"></td>
-        <td id="LC1413" class="blob-code js-file-line">  buffer = <span class="pl-s3">realloc</span>(buffer, <span class="pl-s3">strlen</span>(buffer) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1414" class="blob-num js-line-number" data-line-number="1414"></td>
-        <td id="LC1414" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">fail</span>.<span class="pl-vo">m</span> = buffer;</td>
-      </tr>
-      <tr>
-        <td id="L1415" class="blob-num js-line-number" data-line-number="1415"></td>
-        <td id="LC1415" class="blob-code js-file-line">  <span class="pl-k">return</span> p;</td>
-      </tr>
-      <tr>
-        <td id="L1416" class="blob-num js-line-number" data-line-number="1416"></td>
-        <td id="LC1416" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1417" class="blob-num js-line-number" data-line-number="1417"></td>
-        <td id="LC1417" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1418" class="blob-num js-line-number" data-line-number="1418"></td>
-        <td id="LC1418" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1419" class="blob-num js-line-number" data-line-number="1419"></td>
-        <td id="LC1419" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_lift_val</span>(<span class="pl-s3">mpc_val_t</span> *x) {</td>
-      </tr>
-      <tr>
-        <td id="L1420" class="blob-num js-line-number" data-line-number="1420"></td>
-        <td id="LC1420" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-s3">mpc_undefined</span>();</td>
-      </tr>
-      <tr>
-        <td id="L1421" class="blob-num js-line-number" data-line-number="1421"></td>
-        <td id="LC1421" class="blob-code js-file-line">  p-&gt;type = MPC_TYPE_LIFT_VAL;</td>
-      </tr>
-      <tr>
-        <td id="L1422" class="blob-num js-line-number" data-line-number="1422"></td>
-        <td id="LC1422" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">lift</span>.<span class="pl-vo">x</span> = x;</td>
-      </tr>
-      <tr>
-        <td id="L1423" class="blob-num js-line-number" data-line-number="1423"></td>
-        <td id="LC1423" class="blob-code js-file-line">  <span class="pl-k">return</span> p;</td>
-      </tr>
-      <tr>
-        <td id="L1424" class="blob-num js-line-number" data-line-number="1424"></td>
-        <td id="LC1424" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1425" class="blob-num js-line-number" data-line-number="1425"></td>
-        <td id="LC1425" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1426" class="blob-num js-line-number" data-line-number="1426"></td>
-        <td id="LC1426" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_lift</span>(<span class="pl-s3">mpc_ctor_t</span> lf) {</td>
-      </tr>
-      <tr>
-        <td id="L1427" class="blob-num js-line-number" data-line-number="1427"></td>
-        <td id="LC1427" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-s3">mpc_undefined</span>();</td>
-      </tr>
-      <tr>
-        <td id="L1428" class="blob-num js-line-number" data-line-number="1428"></td>
-        <td id="LC1428" class="blob-code js-file-line">  p-&gt;type = MPC_TYPE_LIFT;</td>
-      </tr>
-      <tr>
-        <td id="L1429" class="blob-num js-line-number" data-line-number="1429"></td>
-        <td id="LC1429" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">lift</span>.<span class="pl-vo">lf</span> = lf;</td>
-      </tr>
-      <tr>
-        <td id="L1430" class="blob-num js-line-number" data-line-number="1430"></td>
-        <td id="LC1430" class="blob-code js-file-line">  <span class="pl-k">return</span> p;</td>
-      </tr>
-      <tr>
-        <td id="L1431" class="blob-num js-line-number" data-line-number="1431"></td>
-        <td id="LC1431" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1432" class="blob-num js-line-number" data-line-number="1432"></td>
-        <td id="LC1432" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1433" class="blob-num js-line-number" data-line-number="1433"></td>
-        <td id="LC1433" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_anchor</span>(<span class="pl-st">int</span>(*f)(<span class="pl-st">char</span>,<span class="pl-st">char</span>)) {</td>
-      </tr>
-      <tr>
-        <td id="L1434" class="blob-num js-line-number" data-line-number="1434"></td>
-        <td id="LC1434" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-s3">mpc_undefined</span>();</td>
-      </tr>
-      <tr>
-        <td id="L1435" class="blob-num js-line-number" data-line-number="1435"></td>
-        <td id="LC1435" class="blob-code js-file-line">  p-&gt;type = MPC_TYPE_ANCHOR;</td>
-      </tr>
-      <tr>
-        <td id="L1436" class="blob-num js-line-number" data-line-number="1436"></td>
-        <td id="LC1436" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">anchor</span>.<span class="pl-vo">f</span> = f;</td>
-      </tr>
-      <tr>
-        <td id="L1437" class="blob-num js-line-number" data-line-number="1437"></td>
-        <td id="LC1437" class="blob-code js-file-line">  <span class="pl-k">return</span> p;</td>
-      </tr>
-      <tr>
-        <td id="L1438" class="blob-num js-line-number" data-line-number="1438"></td>
-        <td id="LC1438" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1439" class="blob-num js-line-number" data-line-number="1439"></td>
-        <td id="LC1439" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1440" class="blob-num js-line-number" data-line-number="1440"></td>
-        <td id="LC1440" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_state</span>(<span class="pl-st">void</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L1441" class="blob-num js-line-number" data-line-number="1441"></td>
-        <td id="LC1441" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-s3">mpc_undefined</span>();</td>
-      </tr>
-      <tr>
-        <td id="L1442" class="blob-num js-line-number" data-line-number="1442"></td>
-        <td id="LC1442" class="blob-code js-file-line">  p-&gt;type = MPC_TYPE_STATE;</td>
-      </tr>
-      <tr>
-        <td id="L1443" class="blob-num js-line-number" data-line-number="1443"></td>
-        <td id="LC1443" class="blob-code js-file-line">  <span class="pl-k">return</span> p;</td>
-      </tr>
-      <tr>
-        <td id="L1444" class="blob-num js-line-number" data-line-number="1444"></td>
-        <td id="LC1444" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1445" class="blob-num js-line-number" data-line-number="1445"></td>
-        <td id="LC1445" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1446" class="blob-num js-line-number" data-line-number="1446"></td>
-        <td id="LC1446" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_expect</span>(<span class="pl-s3">mpc_parser_t</span> *a, <span class="pl-s">const</span> <span class="pl-st">char</span> *expected) {</td>
-      </tr>
-      <tr>
-        <td id="L1447" class="blob-num js-line-number" data-line-number="1447"></td>
-        <td id="LC1447" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-s3">mpc_undefined</span>();</td>
-      </tr>
-      <tr>
-        <td id="L1448" class="blob-num js-line-number" data-line-number="1448"></td>
-        <td id="LC1448" class="blob-code js-file-line">  p-&gt;type = MPC_TYPE_EXPECT;</td>
-      </tr>
-      <tr>
-        <td id="L1449" class="blob-num js-line-number" data-line-number="1449"></td>
-        <td id="LC1449" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">expect</span>.<span class="pl-vo">x</span> = a;</td>
-      </tr>
-      <tr>
-        <td id="L1450" class="blob-num js-line-number" data-line-number="1450"></td>
-        <td id="LC1450" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">expect</span>.<span class="pl-vo">m</span> = <span class="pl-s3">malloc</span>(<span class="pl-s3">strlen</span>(expected) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1451" class="blob-num js-line-number" data-line-number="1451"></td>
-        <td id="LC1451" class="blob-code js-file-line">  <span class="pl-s3">strcpy</span>(p-&gt;data.<span class="pl-vo">expect</span>.<span class="pl-vo">m</span>, expected);</td>
-      </tr>
-      <tr>
-        <td id="L1452" class="blob-num js-line-number" data-line-number="1452"></td>
-        <td id="LC1452" class="blob-code js-file-line">  <span class="pl-k">return</span> p;</td>
-      </tr>
-      <tr>
-        <td id="L1453" class="blob-num js-line-number" data-line-number="1453"></td>
-        <td id="LC1453" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1454" class="blob-num js-line-number" data-line-number="1454"></td>
-        <td id="LC1454" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1455" class="blob-num js-line-number" data-line-number="1455"></td>
-        <td id="LC1455" class="blob-code js-file-line"><span class="pl-c">/*</span></td>
-      </tr>
-      <tr>
-        <td id="L1456" class="blob-num js-line-number" data-line-number="1456"></td>
-        <td id="LC1456" class="blob-code js-file-line"><span class="pl-c">** As `snprintf` is not ANSI standard this </span></td>
-      </tr>
-      <tr>
-        <td id="L1457" class="blob-num js-line-number" data-line-number="1457"></td>
-        <td id="LC1457" class="blob-code js-file-line"><span class="pl-c">** function `mpc_expectf` should be considered</span></td>
-      </tr>
-      <tr>
-        <td id="L1458" class="blob-num js-line-number" data-line-number="1458"></td>
-        <td id="LC1458" class="blob-code js-file-line"><span class="pl-c">** unsafe.</span></td>
-      </tr>
-      <tr>
-        <td id="L1459" class="blob-num js-line-number" data-line-number="1459"></td>
-        <td id="LC1459" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L1460" class="blob-num js-line-number" data-line-number="1460"></td>
-        <td id="LC1460" class="blob-code js-file-line"><span class="pl-c">** You have a few options if this is going to be</span></td>
-      </tr>
-      <tr>
-        <td id="L1461" class="blob-num js-line-number" data-line-number="1461"></td>
-        <td id="LC1461" class="blob-code js-file-line"><span class="pl-c">** trouble.</span></td>
-      </tr>
-      <tr>
-        <td id="L1462" class="blob-num js-line-number" data-line-number="1462"></td>
-        <td id="LC1462" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L1463" class="blob-num js-line-number" data-line-number="1463"></td>
-        <td id="LC1463" class="blob-code js-file-line"><span class="pl-c">** - Ensure the format string does not exceed</span></td>
-      </tr>
-      <tr>
-        <td id="L1464" class="blob-num js-line-number" data-line-number="1464"></td>
-        <td id="LC1464" class="blob-code js-file-line"><span class="pl-c">**   the buffer length using precision specifiers</span></td>
-      </tr>
-      <tr>
-        <td id="L1465" class="blob-num js-line-number" data-line-number="1465"></td>
-        <td id="LC1465" class="blob-code js-file-line"><span class="pl-c">**   such as `%.512s`.</span></td>
-      </tr>
-      <tr>
-        <td id="L1466" class="blob-num js-line-number" data-line-number="1466"></td>
-        <td id="LC1466" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L1467" class="blob-num js-line-number" data-line-number="1467"></td>
-        <td id="LC1467" class="blob-code js-file-line"><span class="pl-c">** - Patch this function in your code base to </span></td>
-      </tr>
-      <tr>
-        <td id="L1468" class="blob-num js-line-number" data-line-number="1468"></td>
-        <td id="LC1468" class="blob-code js-file-line"><span class="pl-c">**   use `snprintf` or whatever variant your</span></td>
-      </tr>
-      <tr>
-        <td id="L1469" class="blob-num js-line-number" data-line-number="1469"></td>
-        <td id="LC1469" class="blob-code js-file-line"><span class="pl-c">**   system supports.</span></td>
-      </tr>
-      <tr>
-        <td id="L1470" class="blob-num js-line-number" data-line-number="1470"></td>
-        <td id="LC1470" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L1471" class="blob-num js-line-number" data-line-number="1471"></td>
-        <td id="LC1471" class="blob-code js-file-line"><span class="pl-c">** - Avoid it altogether.</span></td>
-      </tr>
-      <tr>
-        <td id="L1472" class="blob-num js-line-number" data-line-number="1472"></td>
-        <td id="LC1472" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L1473" class="blob-num js-line-number" data-line-number="1473"></td>
-        <td id="LC1473" class="blob-code js-file-line"><span class="pl-c">*/</span></td>
-      </tr>
-      <tr>
-        <td id="L1474" class="blob-num js-line-number" data-line-number="1474"></td>
-        <td id="LC1474" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1475" class="blob-num js-line-number" data-line-number="1475"></td>
-        <td id="LC1475" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_expectf</span>(<span class="pl-s3">mpc_parser_t</span> *a, <span class="pl-s">const</span> <span class="pl-st">char</span> *fmt, ...) {</td>
-      </tr>
-      <tr>
-        <td id="L1476" class="blob-num js-line-number" data-line-number="1476"></td>
-        <td id="LC1476" class="blob-code js-file-line">  <span class="pl-s3">va_list</span> va;</td>
-      </tr>
-      <tr>
-        <td id="L1477" class="blob-num js-line-number" data-line-number="1477"></td>
-        <td id="LC1477" class="blob-code js-file-line">  <span class="pl-st">char</span> *buffer;</td>
-      </tr>
-      <tr>
-        <td id="L1478" class="blob-num js-line-number" data-line-number="1478"></td>
-        <td id="LC1478" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1479" class="blob-num js-line-number" data-line-number="1479"></td>
-        <td id="LC1479" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-s3">mpc_undefined</span>();</td>
-      </tr>
-      <tr>
-        <td id="L1480" class="blob-num js-line-number" data-line-number="1480"></td>
-        <td id="LC1480" class="blob-code js-file-line">  p-&gt;type = MPC_TYPE_EXPECT;</td>
-      </tr>
-      <tr>
-        <td id="L1481" class="blob-num js-line-number" data-line-number="1481"></td>
-        <td id="LC1481" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1482" class="blob-num js-line-number" data-line-number="1482"></td>
-        <td id="LC1482" class="blob-code js-file-line">  <span class="pl-s3">va_start</span>(va, fmt);</td>
-      </tr>
-      <tr>
-        <td id="L1483" class="blob-num js-line-number" data-line-number="1483"></td>
-        <td id="LC1483" class="blob-code js-file-line">  buffer = <span class="pl-s3">malloc</span>(<span class="pl-c1">2048</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1484" class="blob-num js-line-number" data-line-number="1484"></td>
-        <td id="LC1484" class="blob-code js-file-line">  <span class="pl-s3">vsprintf</span>(buffer, fmt, va);</td>
-      </tr>
-      <tr>
-        <td id="L1485" class="blob-num js-line-number" data-line-number="1485"></td>
-        <td id="LC1485" class="blob-code js-file-line">  <span class="pl-s3">va_end</span>(va);</td>
-      </tr>
-      <tr>
-        <td id="L1486" class="blob-num js-line-number" data-line-number="1486"></td>
-        <td id="LC1486" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1487" class="blob-num js-line-number" data-line-number="1487"></td>
-        <td id="LC1487" class="blob-code js-file-line">  buffer = <span class="pl-s3">realloc</span>(buffer, <span class="pl-s3">strlen</span>(buffer) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1488" class="blob-num js-line-number" data-line-number="1488"></td>
-        <td id="LC1488" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">expect</span>.<span class="pl-vo">x</span> = a;</td>
-      </tr>
-      <tr>
-        <td id="L1489" class="blob-num js-line-number" data-line-number="1489"></td>
-        <td id="LC1489" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">expect</span>.<span class="pl-vo">m</span> = buffer;</td>
-      </tr>
-      <tr>
-        <td id="L1490" class="blob-num js-line-number" data-line-number="1490"></td>
-        <td id="LC1490" class="blob-code js-file-line">  <span class="pl-k">return</span> p;</td>
-      </tr>
-      <tr>
-        <td id="L1491" class="blob-num js-line-number" data-line-number="1491"></td>
-        <td id="LC1491" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1492" class="blob-num js-line-number" data-line-number="1492"></td>
-        <td id="LC1492" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1493" class="blob-num js-line-number" data-line-number="1493"></td>
-        <td id="LC1493" class="blob-code js-file-line"><span class="pl-c">/*</span></td>
-      </tr>
-      <tr>
-        <td id="L1494" class="blob-num js-line-number" data-line-number="1494"></td>
-        <td id="LC1494" class="blob-code js-file-line"><span class="pl-c">** Basic Parsers</span></td>
-      </tr>
-      <tr>
-        <td id="L1495" class="blob-num js-line-number" data-line-number="1495"></td>
-        <td id="LC1495" class="blob-code js-file-line"><span class="pl-c">*/</span></td>
-      </tr>
-      <tr>
-        <td id="L1496" class="blob-num js-line-number" data-line-number="1496"></td>
-        <td id="LC1496" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1497" class="blob-num js-line-number" data-line-number="1497"></td>
-        <td id="LC1497" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_any</span>(<span class="pl-st">void</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L1498" class="blob-num js-line-number" data-line-number="1498"></td>
-        <td id="LC1498" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-s3">mpc_undefined</span>();</td>
-      </tr>
-      <tr>
-        <td id="L1499" class="blob-num js-line-number" data-line-number="1499"></td>
-        <td id="LC1499" class="blob-code js-file-line">  p-&gt;type = MPC_TYPE_ANY;</td>
-      </tr>
-      <tr>
-        <td id="L1500" class="blob-num js-line-number" data-line-number="1500"></td>
-        <td id="LC1500" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">mpc_expect</span>(p, <span class="pl-s1"><span class="pl-pds">&quot;</span>any character<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L1501" class="blob-num js-line-number" data-line-number="1501"></td>
-        <td id="LC1501" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1502" class="blob-num js-line-number" data-line-number="1502"></td>
-        <td id="LC1502" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1503" class="blob-num js-line-number" data-line-number="1503"></td>
-        <td id="LC1503" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_char</span>(<span class="pl-st">char</span> c) {</td>
-      </tr>
-      <tr>
-        <td id="L1504" class="blob-num js-line-number" data-line-number="1504"></td>
-        <td id="LC1504" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-s3">mpc_undefined</span>();</td>
-      </tr>
-      <tr>
-        <td id="L1505" class="blob-num js-line-number" data-line-number="1505"></td>
-        <td id="LC1505" class="blob-code js-file-line">  p-&gt;type = MPC_TYPE_SINGLE;</td>
-      </tr>
-      <tr>
-        <td id="L1506" class="blob-num js-line-number" data-line-number="1506"></td>
-        <td id="LC1506" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">single</span>.<span class="pl-vo">x</span> = c;</td>
-      </tr>
-      <tr>
-        <td id="L1507" class="blob-num js-line-number" data-line-number="1507"></td>
-        <td id="LC1507" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">mpc_expectf</span>(p, <span class="pl-s1"><span class="pl-pds">&quot;</span>&#39;<span class="pl-c1">%c</span>&#39;<span class="pl-pds">&quot;</span></span>, c);</td>
-      </tr>
-      <tr>
-        <td id="L1508" class="blob-num js-line-number" data-line-number="1508"></td>
-        <td id="LC1508" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1509" class="blob-num js-line-number" data-line-number="1509"></td>
-        <td id="LC1509" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1510" class="blob-num js-line-number" data-line-number="1510"></td>
-        <td id="LC1510" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_range</span>(<span class="pl-st">char</span> s, <span class="pl-st">char</span> e) {</td>
-      </tr>
-      <tr>
-        <td id="L1511" class="blob-num js-line-number" data-line-number="1511"></td>
-        <td id="LC1511" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-s3">mpc_undefined</span>();</td>
-      </tr>
-      <tr>
-        <td id="L1512" class="blob-num js-line-number" data-line-number="1512"></td>
-        <td id="LC1512" class="blob-code js-file-line">  p-&gt;type = MPC_TYPE_RANGE;</td>
-      </tr>
-      <tr>
-        <td id="L1513" class="blob-num js-line-number" data-line-number="1513"></td>
-        <td id="LC1513" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">range</span>.<span class="pl-vo">x</span> = s;</td>
-      </tr>
-      <tr>
-        <td id="L1514" class="blob-num js-line-number" data-line-number="1514"></td>
-        <td id="LC1514" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">range</span>.<span class="pl-vo">y</span> = e;</td>
-      </tr>
-      <tr>
-        <td id="L1515" class="blob-num js-line-number" data-line-number="1515"></td>
-        <td id="LC1515" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">mpc_expectf</span>(p, <span class="pl-s1"><span class="pl-pds">&quot;</span>character between &#39;<span class="pl-c1">%c</span>&#39; and &#39;<span class="pl-c1">%c</span>&#39;<span class="pl-pds">&quot;</span></span>, s, e);</td>
-      </tr>
-      <tr>
-        <td id="L1516" class="blob-num js-line-number" data-line-number="1516"></td>
-        <td id="LC1516" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1517" class="blob-num js-line-number" data-line-number="1517"></td>
-        <td id="LC1517" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1518" class="blob-num js-line-number" data-line-number="1518"></td>
-        <td id="LC1518" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_oneof</span>(<span class="pl-s">const</span> <span class="pl-st">char</span> *s) {</td>
-      </tr>
-      <tr>
-        <td id="L1519" class="blob-num js-line-number" data-line-number="1519"></td>
-        <td id="LC1519" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-s3">mpc_undefined</span>();</td>
-      </tr>
-      <tr>
-        <td id="L1520" class="blob-num js-line-number" data-line-number="1520"></td>
-        <td id="LC1520" class="blob-code js-file-line">  p-&gt;type = MPC_TYPE_ONEOF;</td>
-      </tr>
-      <tr>
-        <td id="L1521" class="blob-num js-line-number" data-line-number="1521"></td>
-        <td id="LC1521" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">string</span>.<span class="pl-vo">x</span> = <span class="pl-s3">malloc</span>(<span class="pl-s3">strlen</span>(s) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1522" class="blob-num js-line-number" data-line-number="1522"></td>
-        <td id="LC1522" class="blob-code js-file-line">  <span class="pl-s3">strcpy</span>(p-&gt;data.<span class="pl-vo">string</span>.<span class="pl-vo">x</span>, s);</td>
-      </tr>
-      <tr>
-        <td id="L1523" class="blob-num js-line-number" data-line-number="1523"></td>
-        <td id="LC1523" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">mpc_expectf</span>(p, <span class="pl-s1"><span class="pl-pds">&quot;</span>one of &#39;<span class="pl-c1">%s</span>&#39;<span class="pl-pds">&quot;</span></span>, s);</td>
-      </tr>
-      <tr>
-        <td id="L1524" class="blob-num js-line-number" data-line-number="1524"></td>
-        <td id="LC1524" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1525" class="blob-num js-line-number" data-line-number="1525"></td>
-        <td id="LC1525" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1526" class="blob-num js-line-number" data-line-number="1526"></td>
-        <td id="LC1526" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_noneof</span>(<span class="pl-s">const</span> <span class="pl-st">char</span> *s) {</td>
-      </tr>
-      <tr>
-        <td id="L1527" class="blob-num js-line-number" data-line-number="1527"></td>
-        <td id="LC1527" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-s3">mpc_undefined</span>();</td>
-      </tr>
-      <tr>
-        <td id="L1528" class="blob-num js-line-number" data-line-number="1528"></td>
-        <td id="LC1528" class="blob-code js-file-line">  p-&gt;type = MPC_TYPE_NONEOF;</td>
-      </tr>
-      <tr>
-        <td id="L1529" class="blob-num js-line-number" data-line-number="1529"></td>
-        <td id="LC1529" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">string</span>.<span class="pl-vo">x</span> = <span class="pl-s3">malloc</span>(<span class="pl-s3">strlen</span>(s) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1530" class="blob-num js-line-number" data-line-number="1530"></td>
-        <td id="LC1530" class="blob-code js-file-line">  <span class="pl-s3">strcpy</span>(p-&gt;data.<span class="pl-vo">string</span>.<span class="pl-vo">x</span>, s);</td>
-      </tr>
-      <tr>
-        <td id="L1531" class="blob-num js-line-number" data-line-number="1531"></td>
-        <td id="LC1531" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">mpc_expectf</span>(p, <span class="pl-s1"><span class="pl-pds">&quot;</span>one of &#39;<span class="pl-c1">%s</span>&#39;<span class="pl-pds">&quot;</span></span>, s);</td>
-      </tr>
-      <tr>
-        <td id="L1532" class="blob-num js-line-number" data-line-number="1532"></td>
-        <td id="LC1532" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1533" class="blob-num js-line-number" data-line-number="1533"></td>
-        <td id="LC1533" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1534" class="blob-num js-line-number" data-line-number="1534"></td>
-        <td id="LC1534" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1535" class="blob-num js-line-number" data-line-number="1535"></td>
-        <td id="LC1535" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_satisfy</span>(<span class="pl-st">int</span>(*f)(<span class="pl-st">char</span>)) {</td>
-      </tr>
-      <tr>
-        <td id="L1536" class="blob-num js-line-number" data-line-number="1536"></td>
-        <td id="LC1536" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-s3">mpc_undefined</span>();</td>
-      </tr>
-      <tr>
-        <td id="L1537" class="blob-num js-line-number" data-line-number="1537"></td>
-        <td id="LC1537" class="blob-code js-file-line">  p-&gt;type = MPC_TYPE_SATISFY;</td>
-      </tr>
-      <tr>
-        <td id="L1538" class="blob-num js-line-number" data-line-number="1538"></td>
-        <td id="LC1538" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">satisfy</span>.<span class="pl-vo">f</span> = f;</td>
-      </tr>
-      <tr>
-        <td id="L1539" class="blob-num js-line-number" data-line-number="1539"></td>
-        <td id="LC1539" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">mpc_expectf</span>(p, <span class="pl-s1"><span class="pl-pds">&quot;</span>character satisfying function <span class="pl-c1">%p</span><span class="pl-pds">&quot;</span></span>, f);</td>
-      </tr>
-      <tr>
-        <td id="L1540" class="blob-num js-line-number" data-line-number="1540"></td>
-        <td id="LC1540" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1541" class="blob-num js-line-number" data-line-number="1541"></td>
-        <td id="LC1541" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1542" class="blob-num js-line-number" data-line-number="1542"></td>
-        <td id="LC1542" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_string</span>(<span class="pl-s">const</span> <span class="pl-st">char</span> *s) {</td>
-      </tr>
-      <tr>
-        <td id="L1543" class="blob-num js-line-number" data-line-number="1543"></td>
-        <td id="LC1543" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-s3">mpc_undefined</span>();</td>
-      </tr>
-      <tr>
-        <td id="L1544" class="blob-num js-line-number" data-line-number="1544"></td>
-        <td id="LC1544" class="blob-code js-file-line">  p-&gt;type = MPC_TYPE_STRING;</td>
-      </tr>
-      <tr>
-        <td id="L1545" class="blob-num js-line-number" data-line-number="1545"></td>
-        <td id="LC1545" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">string</span>.<span class="pl-vo">x</span> = <span class="pl-s3">malloc</span>(<span class="pl-s3">strlen</span>(s) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1546" class="blob-num js-line-number" data-line-number="1546"></td>
-        <td id="LC1546" class="blob-code js-file-line">  <span class="pl-s3">strcpy</span>(p-&gt;data.<span class="pl-vo">string</span>.<span class="pl-vo">x</span>, s);</td>
-      </tr>
-      <tr>
-        <td id="L1547" class="blob-num js-line-number" data-line-number="1547"></td>
-        <td id="LC1547" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">mpc_expectf</span>(p, <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-cce">\&quot;</span><span class="pl-c1">%s</span><span class="pl-cce">\&quot;</span><span class="pl-pds">&quot;</span></span>, s);</td>
-      </tr>
-      <tr>
-        <td id="L1548" class="blob-num js-line-number" data-line-number="1548"></td>
-        <td id="LC1548" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1549" class="blob-num js-line-number" data-line-number="1549"></td>
-        <td id="LC1549" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1550" class="blob-num js-line-number" data-line-number="1550"></td>
-        <td id="LC1550" class="blob-code js-file-line"><span class="pl-c">/*</span></td>
-      </tr>
-      <tr>
-        <td id="L1551" class="blob-num js-line-number" data-line-number="1551"></td>
-        <td id="LC1551" class="blob-code js-file-line"><span class="pl-c">** Core Parsers</span></td>
-      </tr>
-      <tr>
-        <td id="L1552" class="blob-num js-line-number" data-line-number="1552"></td>
-        <td id="LC1552" class="blob-code js-file-line"><span class="pl-c">*/</span></td>
-      </tr>
-      <tr>
-        <td id="L1553" class="blob-num js-line-number" data-line-number="1553"></td>
-        <td id="LC1553" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1554" class="blob-num js-line-number" data-line-number="1554"></td>
-        <td id="LC1554" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_apply</span>(<span class="pl-s3">mpc_parser_t</span> *a, <span class="pl-s3">mpc_apply_t</span> f) {</td>
-      </tr>
-      <tr>
-        <td id="L1555" class="blob-num js-line-number" data-line-number="1555"></td>
-        <td id="LC1555" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-s3">mpc_undefined</span>();</td>
-      </tr>
-      <tr>
-        <td id="L1556" class="blob-num js-line-number" data-line-number="1556"></td>
-        <td id="LC1556" class="blob-code js-file-line">  p-&gt;type = MPC_TYPE_APPLY;</td>
-      </tr>
-      <tr>
-        <td id="L1557" class="blob-num js-line-number" data-line-number="1557"></td>
-        <td id="LC1557" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">apply</span>.<span class="pl-vo">x</span> = a;</td>
-      </tr>
-      <tr>
-        <td id="L1558" class="blob-num js-line-number" data-line-number="1558"></td>
-        <td id="LC1558" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">apply</span>.<span class="pl-vo">f</span> = f;</td>
-      </tr>
-      <tr>
-        <td id="L1559" class="blob-num js-line-number" data-line-number="1559"></td>
-        <td id="LC1559" class="blob-code js-file-line">  <span class="pl-k">return</span> p;</td>
-      </tr>
-      <tr>
-        <td id="L1560" class="blob-num js-line-number" data-line-number="1560"></td>
-        <td id="LC1560" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1561" class="blob-num js-line-number" data-line-number="1561"></td>
-        <td id="LC1561" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1562" class="blob-num js-line-number" data-line-number="1562"></td>
-        <td id="LC1562" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_apply_to</span>(<span class="pl-s3">mpc_parser_t</span> *a, <span class="pl-s3">mpc_apply_to_t</span> f, <span class="pl-st">void</span> *x) {</td>
-      </tr>
-      <tr>
-        <td id="L1563" class="blob-num js-line-number" data-line-number="1563"></td>
-        <td id="LC1563" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-s3">mpc_undefined</span>();</td>
-      </tr>
-      <tr>
-        <td id="L1564" class="blob-num js-line-number" data-line-number="1564"></td>
-        <td id="LC1564" class="blob-code js-file-line">  p-&gt;type = MPC_TYPE_APPLY_TO;</td>
-      </tr>
-      <tr>
-        <td id="L1565" class="blob-num js-line-number" data-line-number="1565"></td>
-        <td id="LC1565" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">apply_to</span>.<span class="pl-vo">x</span> = a;</td>
-      </tr>
-      <tr>
-        <td id="L1566" class="blob-num js-line-number" data-line-number="1566"></td>
-        <td id="LC1566" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">apply_to</span>.<span class="pl-vo">f</span> = f;</td>
-      </tr>
-      <tr>
-        <td id="L1567" class="blob-num js-line-number" data-line-number="1567"></td>
-        <td id="LC1567" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">apply_to</span>.<span class="pl-vo">d</span> = x;</td>
-      </tr>
-      <tr>
-        <td id="L1568" class="blob-num js-line-number" data-line-number="1568"></td>
-        <td id="LC1568" class="blob-code js-file-line">  <span class="pl-k">return</span> p;</td>
-      </tr>
-      <tr>
-        <td id="L1569" class="blob-num js-line-number" data-line-number="1569"></td>
-        <td id="LC1569" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1570" class="blob-num js-line-number" data-line-number="1570"></td>
-        <td id="LC1570" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1571" class="blob-num js-line-number" data-line-number="1571"></td>
-        <td id="LC1571" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_predictive</span>(<span class="pl-s3">mpc_parser_t</span> *a) {</td>
-      </tr>
-      <tr>
-        <td id="L1572" class="blob-num js-line-number" data-line-number="1572"></td>
-        <td id="LC1572" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-s3">mpc_undefined</span>();</td>
-      </tr>
-      <tr>
-        <td id="L1573" class="blob-num js-line-number" data-line-number="1573"></td>
-        <td id="LC1573" class="blob-code js-file-line">  p-&gt;type = MPC_TYPE_PREDICT;</td>
-      </tr>
-      <tr>
-        <td id="L1574" class="blob-num js-line-number" data-line-number="1574"></td>
-        <td id="LC1574" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">predict</span>.<span class="pl-vo">x</span> = a;</td>
-      </tr>
-      <tr>
-        <td id="L1575" class="blob-num js-line-number" data-line-number="1575"></td>
-        <td id="LC1575" class="blob-code js-file-line">  <span class="pl-k">return</span> p;</td>
-      </tr>
-      <tr>
-        <td id="L1576" class="blob-num js-line-number" data-line-number="1576"></td>
-        <td id="LC1576" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1577" class="blob-num js-line-number" data-line-number="1577"></td>
-        <td id="LC1577" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1578" class="blob-num js-line-number" data-line-number="1578"></td>
-        <td id="LC1578" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_not_lift</span>(<span class="pl-s3">mpc_parser_t</span> *a, <span class="pl-s3">mpc_dtor_t</span> da, <span class="pl-s3">mpc_ctor_t</span> lf) {</td>
-      </tr>
-      <tr>
-        <td id="L1579" class="blob-num js-line-number" data-line-number="1579"></td>
-        <td id="LC1579" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-s3">mpc_undefined</span>();</td>
-      </tr>
-      <tr>
-        <td id="L1580" class="blob-num js-line-number" data-line-number="1580"></td>
-        <td id="LC1580" class="blob-code js-file-line">  p-&gt;type = MPC_TYPE_NOT;</td>
-      </tr>
-      <tr>
-        <td id="L1581" class="blob-num js-line-number" data-line-number="1581"></td>
-        <td id="LC1581" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">not</span>.<span class="pl-vo">x</span> = a;</td>
-      </tr>
-      <tr>
-        <td id="L1582" class="blob-num js-line-number" data-line-number="1582"></td>
-        <td id="LC1582" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">not</span>.<span class="pl-vo">dx</span> = da;</td>
-      </tr>
-      <tr>
-        <td id="L1583" class="blob-num js-line-number" data-line-number="1583"></td>
-        <td id="LC1583" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">not</span>.<span class="pl-vo">lf</span> = lf;</td>
-      </tr>
-      <tr>
-        <td id="L1584" class="blob-num js-line-number" data-line-number="1584"></td>
-        <td id="LC1584" class="blob-code js-file-line">  <span class="pl-k">return</span> p;</td>
-      </tr>
-      <tr>
-        <td id="L1585" class="blob-num js-line-number" data-line-number="1585"></td>
-        <td id="LC1585" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1586" class="blob-num js-line-number" data-line-number="1586"></td>
-        <td id="LC1586" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1587" class="blob-num js-line-number" data-line-number="1587"></td>
-        <td id="LC1587" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_not</span>(<span class="pl-s3">mpc_parser_t</span> *a, <span class="pl-s3">mpc_dtor_t</span> da) {</td>
-      </tr>
-      <tr>
-        <td id="L1588" class="blob-num js-line-number" data-line-number="1588"></td>
-        <td id="LC1588" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">mpc_not_lift</span>(a, da, mpcf_ctor_null);</td>
-      </tr>
-      <tr>
-        <td id="L1589" class="blob-num js-line-number" data-line-number="1589"></td>
-        <td id="LC1589" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1590" class="blob-num js-line-number" data-line-number="1590"></td>
-        <td id="LC1590" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1591" class="blob-num js-line-number" data-line-number="1591"></td>
-        <td id="LC1591" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_maybe_lift</span>(<span class="pl-s3">mpc_parser_t</span> *a, <span class="pl-s3">mpc_ctor_t</span> lf) {</td>
-      </tr>
-      <tr>
-        <td id="L1592" class="blob-num js-line-number" data-line-number="1592"></td>
-        <td id="LC1592" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-s3">mpc_undefined</span>();</td>
-      </tr>
-      <tr>
-        <td id="L1593" class="blob-num js-line-number" data-line-number="1593"></td>
-        <td id="LC1593" class="blob-code js-file-line">  p-&gt;type = MPC_TYPE_MAYBE;</td>
-      </tr>
-      <tr>
-        <td id="L1594" class="blob-num js-line-number" data-line-number="1594"></td>
-        <td id="LC1594" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">not</span>.<span class="pl-vo">x</span> = a;</td>
-      </tr>
-      <tr>
-        <td id="L1595" class="blob-num js-line-number" data-line-number="1595"></td>
-        <td id="LC1595" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">not</span>.<span class="pl-vo">lf</span> = lf;</td>
-      </tr>
-      <tr>
-        <td id="L1596" class="blob-num js-line-number" data-line-number="1596"></td>
-        <td id="LC1596" class="blob-code js-file-line">  <span class="pl-k">return</span> p;</td>
-      </tr>
-      <tr>
-        <td id="L1597" class="blob-num js-line-number" data-line-number="1597"></td>
-        <td id="LC1597" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1598" class="blob-num js-line-number" data-line-number="1598"></td>
-        <td id="LC1598" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1599" class="blob-num js-line-number" data-line-number="1599"></td>
-        <td id="LC1599" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_maybe</span>(<span class="pl-s3">mpc_parser_t</span> *a) {</td>
-      </tr>
-      <tr>
-        <td id="L1600" class="blob-num js-line-number" data-line-number="1600"></td>
-        <td id="LC1600" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">mpc_maybe_lift</span>(a, mpcf_ctor_null);</td>
-      </tr>
-      <tr>
-        <td id="L1601" class="blob-num js-line-number" data-line-number="1601"></td>
-        <td id="LC1601" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1602" class="blob-num js-line-number" data-line-number="1602"></td>
-        <td id="LC1602" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1603" class="blob-num js-line-number" data-line-number="1603"></td>
-        <td id="LC1603" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_many</span>(<span class="pl-s3">mpc_fold_t</span> f, <span class="pl-s3">mpc_parser_t</span> *a) {</td>
-      </tr>
-      <tr>
-        <td id="L1604" class="blob-num js-line-number" data-line-number="1604"></td>
-        <td id="LC1604" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-s3">mpc_undefined</span>();</td>
-      </tr>
-      <tr>
-        <td id="L1605" class="blob-num js-line-number" data-line-number="1605"></td>
-        <td id="LC1605" class="blob-code js-file-line">  p-&gt;type = MPC_TYPE_MANY;</td>
-      </tr>
-      <tr>
-        <td id="L1606" class="blob-num js-line-number" data-line-number="1606"></td>
-        <td id="LC1606" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">repeat</span>.<span class="pl-vo">x</span> = a;</td>
-      </tr>
-      <tr>
-        <td id="L1607" class="blob-num js-line-number" data-line-number="1607"></td>
-        <td id="LC1607" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">repeat</span>.<span class="pl-vo">f</span> = f;</td>
-      </tr>
-      <tr>
-        <td id="L1608" class="blob-num js-line-number" data-line-number="1608"></td>
-        <td id="LC1608" class="blob-code js-file-line">  <span class="pl-k">return</span> p;</td>
-      </tr>
-      <tr>
-        <td id="L1609" class="blob-num js-line-number" data-line-number="1609"></td>
-        <td id="LC1609" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1610" class="blob-num js-line-number" data-line-number="1610"></td>
-        <td id="LC1610" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1611" class="blob-num js-line-number" data-line-number="1611"></td>
-        <td id="LC1611" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_many1</span>(<span class="pl-s3">mpc_fold_t</span> f, <span class="pl-s3">mpc_parser_t</span> *a) {</td>
-      </tr>
-      <tr>
-        <td id="L1612" class="blob-num js-line-number" data-line-number="1612"></td>
-        <td id="LC1612" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-s3">mpc_undefined</span>();</td>
-      </tr>
-      <tr>
-        <td id="L1613" class="blob-num js-line-number" data-line-number="1613"></td>
-        <td id="LC1613" class="blob-code js-file-line">  p-&gt;type = MPC_TYPE_MANY1;</td>
-      </tr>
-      <tr>
-        <td id="L1614" class="blob-num js-line-number" data-line-number="1614"></td>
-        <td id="LC1614" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">repeat</span>.<span class="pl-vo">x</span> = a;</td>
-      </tr>
-      <tr>
-        <td id="L1615" class="blob-num js-line-number" data-line-number="1615"></td>
-        <td id="LC1615" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">repeat</span>.<span class="pl-vo">f</span> = f;</td>
-      </tr>
-      <tr>
-        <td id="L1616" class="blob-num js-line-number" data-line-number="1616"></td>
-        <td id="LC1616" class="blob-code js-file-line">  <span class="pl-k">return</span> p;</td>
-      </tr>
-      <tr>
-        <td id="L1617" class="blob-num js-line-number" data-line-number="1617"></td>
-        <td id="LC1617" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1618" class="blob-num js-line-number" data-line-number="1618"></td>
-        <td id="LC1618" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1619" class="blob-num js-line-number" data-line-number="1619"></td>
-        <td id="LC1619" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_count</span>(<span class="pl-st">int</span> n, <span class="pl-s3">mpc_fold_t</span> f, <span class="pl-s3">mpc_parser_t</span> *a, <span class="pl-s3">mpc_dtor_t</span> da) {</td>
-      </tr>
-      <tr>
-        <td id="L1620" class="blob-num js-line-number" data-line-number="1620"></td>
-        <td id="LC1620" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-s3">mpc_undefined</span>();</td>
-      </tr>
-      <tr>
-        <td id="L1621" class="blob-num js-line-number" data-line-number="1621"></td>
-        <td id="LC1621" class="blob-code js-file-line">  p-&gt;type = MPC_TYPE_COUNT;</td>
-      </tr>
-      <tr>
-        <td id="L1622" class="blob-num js-line-number" data-line-number="1622"></td>
-        <td id="LC1622" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">repeat</span>.<span class="pl-vo">n</span> = n;</td>
-      </tr>
-      <tr>
-        <td id="L1623" class="blob-num js-line-number" data-line-number="1623"></td>
-        <td id="LC1623" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">repeat</span>.<span class="pl-vo">f</span> = f;</td>
-      </tr>
-      <tr>
-        <td id="L1624" class="blob-num js-line-number" data-line-number="1624"></td>
-        <td id="LC1624" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">repeat</span>.<span class="pl-vo">x</span> = a;</td>
-      </tr>
-      <tr>
-        <td id="L1625" class="blob-num js-line-number" data-line-number="1625"></td>
-        <td id="LC1625" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">repeat</span>.<span class="pl-vo">dx</span> = da;</td>
-      </tr>
-      <tr>
-        <td id="L1626" class="blob-num js-line-number" data-line-number="1626"></td>
-        <td id="LC1626" class="blob-code js-file-line">  <span class="pl-k">return</span> p;</td>
-      </tr>
-      <tr>
-        <td id="L1627" class="blob-num js-line-number" data-line-number="1627"></td>
-        <td id="LC1627" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1628" class="blob-num js-line-number" data-line-number="1628"></td>
-        <td id="LC1628" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1629" class="blob-num js-line-number" data-line-number="1629"></td>
-        <td id="LC1629" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_or</span>(<span class="pl-st">int</span> n, ...) {</td>
-      </tr>
-      <tr>
-        <td id="L1630" class="blob-num js-line-number" data-line-number="1630"></td>
-        <td id="LC1630" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1631" class="blob-num js-line-number" data-line-number="1631"></td>
-        <td id="LC1631" class="blob-code js-file-line">  <span class="pl-st">int</span> i;</td>
-      </tr>
-      <tr>
-        <td id="L1632" class="blob-num js-line-number" data-line-number="1632"></td>
-        <td id="LC1632" class="blob-code js-file-line">  <span class="pl-s3">va_list</span> va;</td>
-      </tr>
-      <tr>
-        <td id="L1633" class="blob-num js-line-number" data-line-number="1633"></td>
-        <td id="LC1633" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1634" class="blob-num js-line-number" data-line-number="1634"></td>
-        <td id="LC1634" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-s3">mpc_undefined</span>();</td>
-      </tr>
-      <tr>
-        <td id="L1635" class="blob-num js-line-number" data-line-number="1635"></td>
-        <td id="LC1635" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1636" class="blob-num js-line-number" data-line-number="1636"></td>
-        <td id="LC1636" class="blob-code js-file-line">  p-&gt;type = MPC_TYPE_OR;</td>
-      </tr>
-      <tr>
-        <td id="L1637" class="blob-num js-line-number" data-line-number="1637"></td>
-        <td id="LC1637" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">or</span>.<span class="pl-vo">n</span> = n;</td>
-      </tr>
-      <tr>
-        <td id="L1638" class="blob-num js-line-number" data-line-number="1638"></td>
-        <td id="LC1638" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">or</span>.<span class="pl-vo">xs</span> = <span class="pl-s3">malloc</span>(<span class="pl-k">sizeof</span>(<span class="pl-s3">mpc_parser_t</span>*) * n);</td>
-      </tr>
-      <tr>
-        <td id="L1639" class="blob-num js-line-number" data-line-number="1639"></td>
-        <td id="LC1639" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1640" class="blob-num js-line-number" data-line-number="1640"></td>
-        <td id="LC1640" class="blob-code js-file-line">  <span class="pl-s3">va_start</span>(va, n);  </td>
-      </tr>
-      <tr>
-        <td id="L1641" class="blob-num js-line-number" data-line-number="1641"></td>
-        <td id="LC1641" class="blob-code js-file-line">  <span class="pl-k">for</span> (i = <span class="pl-c1">0</span>; i &lt; n; i++) {</td>
-      </tr>
-      <tr>
-        <td id="L1642" class="blob-num js-line-number" data-line-number="1642"></td>
-        <td id="LC1642" class="blob-code js-file-line">    p-&gt;data.<span class="pl-vo">or</span>.<span class="pl-vo">xs</span>[i] = <span class="pl-s3">va_arg</span>(va, <span class="pl-s3">mpc_parser_t</span>*);</td>
-      </tr>
-      <tr>
-        <td id="L1643" class="blob-num js-line-number" data-line-number="1643"></td>
-        <td id="LC1643" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L1644" class="blob-num js-line-number" data-line-number="1644"></td>
-        <td id="LC1644" class="blob-code js-file-line">  <span class="pl-s3">va_end</span>(va);</td>
-      </tr>
-      <tr>
-        <td id="L1645" class="blob-num js-line-number" data-line-number="1645"></td>
-        <td id="LC1645" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1646" class="blob-num js-line-number" data-line-number="1646"></td>
-        <td id="LC1646" class="blob-code js-file-line">  <span class="pl-k">return</span> p;</td>
-      </tr>
-      <tr>
-        <td id="L1647" class="blob-num js-line-number" data-line-number="1647"></td>
-        <td id="LC1647" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1648" class="blob-num js-line-number" data-line-number="1648"></td>
-        <td id="LC1648" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1649" class="blob-num js-line-number" data-line-number="1649"></td>
-        <td id="LC1649" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_and</span>(<span class="pl-st">int</span> n, <span class="pl-s3">mpc_fold_t</span> f, ...) {</td>
-      </tr>
-      <tr>
-        <td id="L1650" class="blob-num js-line-number" data-line-number="1650"></td>
-        <td id="LC1650" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1651" class="blob-num js-line-number" data-line-number="1651"></td>
-        <td id="LC1651" class="blob-code js-file-line">  <span class="pl-st">int</span> i;</td>
-      </tr>
-      <tr>
-        <td id="L1652" class="blob-num js-line-number" data-line-number="1652"></td>
-        <td id="LC1652" class="blob-code js-file-line">  <span class="pl-s3">va_list</span> va;</td>
-      </tr>
-      <tr>
-        <td id="L1653" class="blob-num js-line-number" data-line-number="1653"></td>
-        <td id="LC1653" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1654" class="blob-num js-line-number" data-line-number="1654"></td>
-        <td id="LC1654" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-s3">mpc_undefined</span>();</td>
-      </tr>
-      <tr>
-        <td id="L1655" class="blob-num js-line-number" data-line-number="1655"></td>
-        <td id="LC1655" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1656" class="blob-num js-line-number" data-line-number="1656"></td>
-        <td id="LC1656" class="blob-code js-file-line">  p-&gt;type = MPC_TYPE_AND;</td>
-      </tr>
-      <tr>
-        <td id="L1657" class="blob-num js-line-number" data-line-number="1657"></td>
-        <td id="LC1657" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">and</span>.<span class="pl-vo">n</span> = n;</td>
-      </tr>
-      <tr>
-        <td id="L1658" class="blob-num js-line-number" data-line-number="1658"></td>
-        <td id="LC1658" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">and</span>.<span class="pl-vo">f</span> = f;</td>
-      </tr>
-      <tr>
-        <td id="L1659" class="blob-num js-line-number" data-line-number="1659"></td>
-        <td id="LC1659" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">and</span>.<span class="pl-vo">xs</span> = <span class="pl-s3">malloc</span>(<span class="pl-k">sizeof</span>(<span class="pl-s3">mpc_parser_t</span>*) * n);</td>
-      </tr>
-      <tr>
-        <td id="L1660" class="blob-num js-line-number" data-line-number="1660"></td>
-        <td id="LC1660" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">and</span>.<span class="pl-vo">dxs</span> = <span class="pl-s3">malloc</span>(<span class="pl-k">sizeof</span>(<span class="pl-s3">mpc_dtor_t</span>) * (n-<span class="pl-c1">1</span>));</td>
-      </tr>
-      <tr>
-        <td id="L1661" class="blob-num js-line-number" data-line-number="1661"></td>
-        <td id="LC1661" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1662" class="blob-num js-line-number" data-line-number="1662"></td>
-        <td id="LC1662" class="blob-code js-file-line">  <span class="pl-s3">va_start</span>(va, f);  </td>
-      </tr>
-      <tr>
-        <td id="L1663" class="blob-num js-line-number" data-line-number="1663"></td>
-        <td id="LC1663" class="blob-code js-file-line">  <span class="pl-k">for</span> (i = <span class="pl-c1">0</span>; i &lt; n; i++) {</td>
-      </tr>
-      <tr>
-        <td id="L1664" class="blob-num js-line-number" data-line-number="1664"></td>
-        <td id="LC1664" class="blob-code js-file-line">    p-&gt;data.<span class="pl-vo">and</span>.<span class="pl-vo">xs</span>[i] = <span class="pl-s3">va_arg</span>(va, <span class="pl-s3">mpc_parser_t</span>*);</td>
-      </tr>
-      <tr>
-        <td id="L1665" class="blob-num js-line-number" data-line-number="1665"></td>
-        <td id="LC1665" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L1666" class="blob-num js-line-number" data-line-number="1666"></td>
-        <td id="LC1666" class="blob-code js-file-line">  <span class="pl-k">for</span> (i = <span class="pl-c1">0</span>; i &lt; (n-<span class="pl-c1">1</span>); i++) {</td>
-      </tr>
-      <tr>
-        <td id="L1667" class="blob-num js-line-number" data-line-number="1667"></td>
-        <td id="LC1667" class="blob-code js-file-line">    p-&gt;data.<span class="pl-vo">and</span>.<span class="pl-vo">dxs</span>[i] = <span class="pl-s3">va_arg</span>(va, <span class="pl-s3">mpc_dtor_t</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1668" class="blob-num js-line-number" data-line-number="1668"></td>
-        <td id="LC1668" class="blob-code js-file-line">  }  </td>
-      </tr>
-      <tr>
-        <td id="L1669" class="blob-num js-line-number" data-line-number="1669"></td>
-        <td id="LC1669" class="blob-code js-file-line">  <span class="pl-s3">va_end</span>(va);</td>
-      </tr>
-      <tr>
-        <td id="L1670" class="blob-num js-line-number" data-line-number="1670"></td>
-        <td id="LC1670" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1671" class="blob-num js-line-number" data-line-number="1671"></td>
-        <td id="LC1671" class="blob-code js-file-line">  <span class="pl-k">return</span> p;</td>
-      </tr>
-      <tr>
-        <td id="L1672" class="blob-num js-line-number" data-line-number="1672"></td>
-        <td id="LC1672" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1673" class="blob-num js-line-number" data-line-number="1673"></td>
-        <td id="LC1673" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1674" class="blob-num js-line-number" data-line-number="1674"></td>
-        <td id="LC1674" class="blob-code js-file-line"><span class="pl-c">/*</span></td>
-      </tr>
-      <tr>
-        <td id="L1675" class="blob-num js-line-number" data-line-number="1675"></td>
-        <td id="LC1675" class="blob-code js-file-line"><span class="pl-c">** Common Parsers</span></td>
-      </tr>
-      <tr>
-        <td id="L1676" class="blob-num js-line-number" data-line-number="1676"></td>
-        <td id="LC1676" class="blob-code js-file-line"><span class="pl-c">*/</span></td>
-      </tr>
-      <tr>
-        <td id="L1677" class="blob-num js-line-number" data-line-number="1677"></td>
-        <td id="LC1677" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1678" class="blob-num js-line-number" data-line-number="1678"></td>
-        <td id="LC1678" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">int</span> <span class="pl-en">mpc_soi_anchor</span>(<span class="pl-st">char</span> prev, <span class="pl-st">char</span> next) { (<span class="pl-st">void</span>) next; <span class="pl-k">return</span> (prev == <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-ii">\0</span><span class="pl-pds">&#39;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1679" class="blob-num js-line-number" data-line-number="1679"></td>
-        <td id="LC1679" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">int</span> <span class="pl-en">mpc_eoi_anchor</span>(<span class="pl-st">char</span> prev, <span class="pl-st">char</span> next) { (<span class="pl-st">void</span>) prev; <span class="pl-k">return</span> (next == <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-ii">\0</span><span class="pl-pds">&#39;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1680" class="blob-num js-line-number" data-line-number="1680"></td>
-        <td id="LC1680" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1681" class="blob-num js-line-number" data-line-number="1681"></td>
-        <td id="LC1681" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_soi</span>(<span class="pl-st">void</span>) { <span class="pl-k">return</span> <span class="pl-s3">mpc_expect</span>(<span class="pl-s3">mpc_anchor</span>(mpc_soi_anchor), <span class="pl-s1"><span class="pl-pds">&quot;</span>start of input<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1682" class="blob-num js-line-number" data-line-number="1682"></td>
-        <td id="LC1682" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_eoi</span>(<span class="pl-st">void</span>) { <span class="pl-k">return</span> <span class="pl-s3">mpc_expect</span>(<span class="pl-s3">mpc_anchor</span>(mpc_eoi_anchor), <span class="pl-s1"><span class="pl-pds">&quot;</span>end of input<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1683" class="blob-num js-line-number" data-line-number="1683"></td>
-        <td id="LC1683" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1684" class="blob-num js-line-number" data-line-number="1684"></td>
-        <td id="LC1684" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">int</span> <span class="pl-en">mpc_boundary_anchor</span>(<span class="pl-st">char</span> prev, <span class="pl-st">char</span> next) {</td>
-      </tr>
-      <tr>
-        <td id="L1685" class="blob-num js-line-number" data-line-number="1685"></td>
-        <td id="LC1685" class="blob-code js-file-line">  <span class="pl-s">const</span> <span class="pl-st">char</span>* word = <span class="pl-s1"><span class="pl-pds">&quot;</span>abcdefghijklmnopqrstuvwxyz<span class="pl-pds">&quot;</span></span></td>
-      </tr>
-      <tr>
-        <td id="L1686" class="blob-num js-line-number" data-line-number="1686"></td>
-        <td id="LC1686" class="blob-code js-file-line">                     <span class="pl-s1"><span class="pl-pds">&quot;</span>ABCDEFGHIJKLMNOPQRSTUVWXYZ<span class="pl-pds">&quot;</span></span></td>
-      </tr>
-      <tr>
-        <td id="L1687" class="blob-num js-line-number" data-line-number="1687"></td>
-        <td id="LC1687" class="blob-code js-file-line">                     <span class="pl-s1"><span class="pl-pds">&quot;</span>0123456789_<span class="pl-pds">&quot;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L1688" class="blob-num js-line-number" data-line-number="1688"></td>
-        <td id="LC1688" class="blob-code js-file-line">  <span class="pl-k">if</span> ( <span class="pl-s3">strchr</span>(word, next) &amp;&amp;  prev == <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-ii">\0</span><span class="pl-pds">&#39;</span></span>) { <span class="pl-k">return</span> <span class="pl-c1">1</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L1689" class="blob-num js-line-number" data-line-number="1689"></td>
-        <td id="LC1689" class="blob-code js-file-line">  <span class="pl-k">if</span> ( <span class="pl-s3">strchr</span>(word, prev) &amp;&amp;  next == <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-ii">\0</span><span class="pl-pds">&#39;</span></span>) { <span class="pl-k">return</span> <span class="pl-c1">1</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L1690" class="blob-num js-line-number" data-line-number="1690"></td>
-        <td id="LC1690" class="blob-code js-file-line">  <span class="pl-k">if</span> ( <span class="pl-s3">strchr</span>(word, next) &amp;&amp; !<span class="pl-s3">strchr</span>(word, prev)) { <span class="pl-k">return</span> <span class="pl-c1">1</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L1691" class="blob-num js-line-number" data-line-number="1691"></td>
-        <td id="LC1691" class="blob-code js-file-line">  <span class="pl-k">if</span> (!<span class="pl-s3">strchr</span>(word, next) &amp;&amp;  <span class="pl-s3">strchr</span>(word, prev)) { <span class="pl-k">return</span> <span class="pl-c1">1</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L1692" class="blob-num js-line-number" data-line-number="1692"></td>
-        <td id="LC1692" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L1693" class="blob-num js-line-number" data-line-number="1693"></td>
-        <td id="LC1693" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1694" class="blob-num js-line-number" data-line-number="1694"></td>
-        <td id="LC1694" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1695" class="blob-num js-line-number" data-line-number="1695"></td>
-        <td id="LC1695" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_boundary</span>(<span class="pl-st">void</span>) { <span class="pl-k">return</span> <span class="pl-s3">mpc_expect</span>(<span class="pl-s3">mpc_anchor</span>(mpc_boundary_anchor), <span class="pl-s1"><span class="pl-pds">&quot;</span>boundary<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1696" class="blob-num js-line-number" data-line-number="1696"></td>
-        <td id="LC1696" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1697" class="blob-num js-line-number" data-line-number="1697"></td>
-        <td id="LC1697" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_whitespace</span>(<span class="pl-st">void</span>) { <span class="pl-k">return</span> <span class="pl-s3">mpc_expect</span>(<span class="pl-s3">mpc_oneof</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span> <span class="pl-cce">\f\n\r\t\v</span><span class="pl-pds">&quot;</span></span>), <span class="pl-s1"><span class="pl-pds">&quot;</span>whitespace<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1698" class="blob-num js-line-number" data-line-number="1698"></td>
-        <td id="LC1698" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_whitespaces</span>(<span class="pl-st">void</span>) { <span class="pl-k">return</span> <span class="pl-s3">mpc_expect</span>(<span class="pl-s3">mpc_many</span>(mpcf_strfold, <span class="pl-s3">mpc_whitespace</span>()), <span class="pl-s1"><span class="pl-pds">&quot;</span>spaces<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1699" class="blob-num js-line-number" data-line-number="1699"></td>
-        <td id="LC1699" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_blank</span>(<span class="pl-st">void</span>) { <span class="pl-k">return</span> <span class="pl-s3">mpc_expect</span>(<span class="pl-s3">mpc_apply</span>(<span class="pl-s3">mpc_whitespaces</span>(), mpcf_free), <span class="pl-s1"><span class="pl-pds">&quot;</span>whitespace<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1700" class="blob-num js-line-number" data-line-number="1700"></td>
-        <td id="LC1700" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1701" class="blob-num js-line-number" data-line-number="1701"></td>
-        <td id="LC1701" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_newline</span>(<span class="pl-st">void</span>) { <span class="pl-k">return</span> <span class="pl-s3">mpc_expect</span>(<span class="pl-s3">mpc_char</span>(<span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-cce">\n</span><span class="pl-pds">&#39;</span></span>), <span class="pl-s1"><span class="pl-pds">&quot;</span>newline<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1702" class="blob-num js-line-number" data-line-number="1702"></td>
-        <td id="LC1702" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_tab</span>(<span class="pl-st">void</span>) { <span class="pl-k">return</span> <span class="pl-s3">mpc_expect</span>(<span class="pl-s3">mpc_char</span>(<span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-cce">\t</span><span class="pl-pds">&#39;</span></span>), <span class="pl-s1"><span class="pl-pds">&quot;</span>tab<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1703" class="blob-num js-line-number" data-line-number="1703"></td>
-        <td id="LC1703" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_escape</span>(<span class="pl-st">void</span>) { <span class="pl-k">return</span> <span class="pl-s3">mpc_and</span>(<span class="pl-c1">2</span>, mpcf_strfold, <span class="pl-s3">mpc_char</span>(<span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-cce">\\</span><span class="pl-pds">&#39;</span></span>), <span class="pl-s3">mpc_any</span>(), <span class="pl-s3">free</span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1704" class="blob-num js-line-number" data-line-number="1704"></td>
-        <td id="LC1704" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1705" class="blob-num js-line-number" data-line-number="1705"></td>
-        <td id="LC1705" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_digit</span>(<span class="pl-st">void</span>) { <span class="pl-k">return</span> <span class="pl-s3">mpc_expect</span>(<span class="pl-s3">mpc_oneof</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>0123456789<span class="pl-pds">&quot;</span></span>), <span class="pl-s1"><span class="pl-pds">&quot;</span>digit<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1706" class="blob-num js-line-number" data-line-number="1706"></td>
-        <td id="LC1706" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_hexdigit</span>(<span class="pl-st">void</span>) { <span class="pl-k">return</span> <span class="pl-s3">mpc_expect</span>(<span class="pl-s3">mpc_oneof</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>0123456789ABCDEFabcdef<span class="pl-pds">&quot;</span></span>), <span class="pl-s1"><span class="pl-pds">&quot;</span>hex digit<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1707" class="blob-num js-line-number" data-line-number="1707"></td>
-        <td id="LC1707" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_octdigit</span>(<span class="pl-st">void</span>) { <span class="pl-k">return</span> <span class="pl-s3">mpc_expect</span>(<span class="pl-s3">mpc_oneof</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>01234567<span class="pl-pds">&quot;</span></span>), <span class="pl-s1"><span class="pl-pds">&quot;</span>oct digit<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1708" class="blob-num js-line-number" data-line-number="1708"></td>
-        <td id="LC1708" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_digits</span>(<span class="pl-st">void</span>) { <span class="pl-k">return</span> <span class="pl-s3">mpc_expect</span>(<span class="pl-s3">mpc_many1</span>(mpcf_strfold, <span class="pl-s3">mpc_digit</span>()), <span class="pl-s1"><span class="pl-pds">&quot;</span>digits<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1709" class="blob-num js-line-number" data-line-number="1709"></td>
-        <td id="LC1709" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_hexdigits</span>(<span class="pl-st">void</span>) { <span class="pl-k">return</span> <span class="pl-s3">mpc_expect</span>(<span class="pl-s3">mpc_many1</span>(mpcf_strfold, <span class="pl-s3">mpc_hexdigit</span>()), <span class="pl-s1"><span class="pl-pds">&quot;</span>hex digits<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1710" class="blob-num js-line-number" data-line-number="1710"></td>
-        <td id="LC1710" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_octdigits</span>(<span class="pl-st">void</span>) { <span class="pl-k">return</span> <span class="pl-s3">mpc_expect</span>(<span class="pl-s3">mpc_many1</span>(mpcf_strfold, <span class="pl-s3">mpc_octdigit</span>()), <span class="pl-s1"><span class="pl-pds">&quot;</span>oct digits<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1711" class="blob-num js-line-number" data-line-number="1711"></td>
-        <td id="LC1711" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1712" class="blob-num js-line-number" data-line-number="1712"></td>
-        <td id="LC1712" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_lower</span>(<span class="pl-st">void</span>) { <span class="pl-k">return</span> <span class="pl-s3">mpc_expect</span>(<span class="pl-s3">mpc_oneof</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>abcdefghijklmnopqrstuvwxyz<span class="pl-pds">&quot;</span></span>), <span class="pl-s1"><span class="pl-pds">&quot;</span>lowercase letter<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1713" class="blob-num js-line-number" data-line-number="1713"></td>
-        <td id="LC1713" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_upper</span>(<span class="pl-st">void</span>) { <span class="pl-k">return</span> <span class="pl-s3">mpc_expect</span>(<span class="pl-s3">mpc_oneof</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>ABCDEFGHIJKLMNOPQRSTUVWXYZ<span class="pl-pds">&quot;</span></span>), <span class="pl-s1"><span class="pl-pds">&quot;</span>uppercase letter<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1714" class="blob-num js-line-number" data-line-number="1714"></td>
-        <td id="LC1714" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_alpha</span>(<span class="pl-st">void</span>) { <span class="pl-k">return</span> <span class="pl-s3">mpc_expect</span>(<span class="pl-s3">mpc_oneof</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ<span class="pl-pds">&quot;</span></span>), <span class="pl-s1"><span class="pl-pds">&quot;</span>letter<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1715" class="blob-num js-line-number" data-line-number="1715"></td>
-        <td id="LC1715" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_underscore</span>(<span class="pl-st">void</span>) { <span class="pl-k">return</span> <span class="pl-s3">mpc_expect</span>(<span class="pl-s3">mpc_char</span>(<span class="pl-s1"><span class="pl-pds">&#39;</span>_<span class="pl-pds">&#39;</span></span>), <span class="pl-s1"><span class="pl-pds">&quot;</span>underscore<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1716" class="blob-num js-line-number" data-line-number="1716"></td>
-        <td id="LC1716" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_alphanum</span>(<span class="pl-st">void</span>) { <span class="pl-k">return</span> <span class="pl-s3">mpc_expect</span>(<span class="pl-s3">mpc_or</span>(<span class="pl-c1">3</span>, <span class="pl-s3">mpc_alpha</span>(), <span class="pl-s3">mpc_digit</span>(), <span class="pl-s3">mpc_underscore</span>()), <span class="pl-s1"><span class="pl-pds">&quot;</span>alphanumeric<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1717" class="blob-num js-line-number" data-line-number="1717"></td>
-        <td id="LC1717" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1718" class="blob-num js-line-number" data-line-number="1718"></td>
-        <td id="LC1718" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_int</span>(<span class="pl-st">void</span>) { <span class="pl-k">return</span> <span class="pl-s3">mpc_expect</span>(<span class="pl-s3">mpc_apply</span>(<span class="pl-s3">mpc_digits</span>(), mpcf_int), <span class="pl-s1"><span class="pl-pds">&quot;</span>integer<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1719" class="blob-num js-line-number" data-line-number="1719"></td>
-        <td id="LC1719" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_hex</span>(<span class="pl-st">void</span>) { <span class="pl-k">return</span> <span class="pl-s3">mpc_expect</span>(<span class="pl-s3">mpc_apply</span>(<span class="pl-s3">mpc_hexdigits</span>(), mpcf_hex), <span class="pl-s1"><span class="pl-pds">&quot;</span>hexadecimal<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1720" class="blob-num js-line-number" data-line-number="1720"></td>
-        <td id="LC1720" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_oct</span>(<span class="pl-st">void</span>) { <span class="pl-k">return</span> <span class="pl-s3">mpc_expect</span>(<span class="pl-s3">mpc_apply</span>(<span class="pl-s3">mpc_octdigits</span>(), mpcf_oct), <span class="pl-s1"><span class="pl-pds">&quot;</span>octadecimal<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1721" class="blob-num js-line-number" data-line-number="1721"></td>
-        <td id="LC1721" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_number</span>(<span class="pl-st">void</span>) { <span class="pl-k">return</span> <span class="pl-s3">mpc_expect</span>(<span class="pl-s3">mpc_or</span>(<span class="pl-c1">3</span>, <span class="pl-s3">mpc_int</span>(), <span class="pl-s3">mpc_hex</span>(), <span class="pl-s3">mpc_oct</span>()), <span class="pl-s1"><span class="pl-pds">&quot;</span>number<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1722" class="blob-num js-line-number" data-line-number="1722"></td>
-        <td id="LC1722" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1723" class="blob-num js-line-number" data-line-number="1723"></td>
-        <td id="LC1723" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_real</span>(<span class="pl-st">void</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L1724" class="blob-num js-line-number" data-line-number="1724"></td>
-        <td id="LC1724" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1725" class="blob-num js-line-number" data-line-number="1725"></td>
-        <td id="LC1725" class="blob-code js-file-line">  <span class="pl-c">/* [+-]?\d+(\.\d+)?([eE][+-]?[0-9]+)? */</span></td>
-      </tr>
-      <tr>
-        <td id="L1726" class="blob-num js-line-number" data-line-number="1726"></td>
-        <td id="LC1726" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1727" class="blob-num js-line-number" data-line-number="1727"></td>
-        <td id="LC1727" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p0, *p1, *p2, *p30, *p31, *p32, *p3;</td>
-      </tr>
-      <tr>
-        <td id="L1728" class="blob-num js-line-number" data-line-number="1728"></td>
-        <td id="LC1728" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1729" class="blob-num js-line-number" data-line-number="1729"></td>
-        <td id="LC1729" class="blob-code js-file-line">  p0 = <span class="pl-s3">mpc_maybe_lift</span>(<span class="pl-s3">mpc_oneof</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>+-<span class="pl-pds">&quot;</span></span>), mpcf_ctor_str);</td>
-      </tr>
-      <tr>
-        <td id="L1730" class="blob-num js-line-number" data-line-number="1730"></td>
-        <td id="LC1730" class="blob-code js-file-line">  p1 = <span class="pl-s3">mpc_digits</span>();</td>
-      </tr>
-      <tr>
-        <td id="L1731" class="blob-num js-line-number" data-line-number="1731"></td>
-        <td id="LC1731" class="blob-code js-file-line">  p2 = <span class="pl-s3">mpc_maybe_lift</span>(<span class="pl-s3">mpc_and</span>(<span class="pl-c1">2</span>, mpcf_strfold, <span class="pl-s3">mpc_char</span>(<span class="pl-s1"><span class="pl-pds">&#39;</span>.<span class="pl-pds">&#39;</span></span>), <span class="pl-s3">mpc_digits</span>(), <span class="pl-s3">free</span>), mpcf_ctor_str);</td>
-      </tr>
-      <tr>
-        <td id="L1732" class="blob-num js-line-number" data-line-number="1732"></td>
-        <td id="LC1732" class="blob-code js-file-line">  p30 = <span class="pl-s3">mpc_oneof</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>eE<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L1733" class="blob-num js-line-number" data-line-number="1733"></td>
-        <td id="LC1733" class="blob-code js-file-line">  p31 = <span class="pl-s3">mpc_maybe_lift</span>(<span class="pl-s3">mpc_oneof</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>+-<span class="pl-pds">&quot;</span></span>), mpcf_ctor_str);</td>
-      </tr>
-      <tr>
-        <td id="L1734" class="blob-num js-line-number" data-line-number="1734"></td>
-        <td id="LC1734" class="blob-code js-file-line">  p32 = <span class="pl-s3">mpc_digits</span>();</td>
-      </tr>
-      <tr>
-        <td id="L1735" class="blob-num js-line-number" data-line-number="1735"></td>
-        <td id="LC1735" class="blob-code js-file-line">  p3 = <span class="pl-s3">mpc_maybe_lift</span>(<span class="pl-s3">mpc_and</span>(<span class="pl-c1">3</span>, mpcf_strfold, p30, p31, p32, <span class="pl-s3">free</span>, <span class="pl-s3">free</span>), mpcf_ctor_str);</td>
-      </tr>
-      <tr>
-        <td id="L1736" class="blob-num js-line-number" data-line-number="1736"></td>
-        <td id="LC1736" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1737" class="blob-num js-line-number" data-line-number="1737"></td>
-        <td id="LC1737" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">mpc_expect</span>(<span class="pl-s3">mpc_and</span>(<span class="pl-c1">4</span>, mpcf_strfold, p0, p1, p2, p3, <span class="pl-s3">free</span>, <span class="pl-s3">free</span>, <span class="pl-s3">free</span>), <span class="pl-s1"><span class="pl-pds">&quot;</span>real<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L1738" class="blob-num js-line-number" data-line-number="1738"></td>
-        <td id="LC1738" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1739" class="blob-num js-line-number" data-line-number="1739"></td>
-        <td id="LC1739" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1740" class="blob-num js-line-number" data-line-number="1740"></td>
-        <td id="LC1740" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1741" class="blob-num js-line-number" data-line-number="1741"></td>
-        <td id="LC1741" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_float</span>(<span class="pl-st">void</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L1742" class="blob-num js-line-number" data-line-number="1742"></td>
-        <td id="LC1742" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">mpc_expect</span>(<span class="pl-s3">mpc_apply</span>(<span class="pl-s3">mpc_real</span>(), mpcf_float), <span class="pl-s1"><span class="pl-pds">&quot;</span>float<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L1743" class="blob-num js-line-number" data-line-number="1743"></td>
-        <td id="LC1743" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1744" class="blob-num js-line-number" data-line-number="1744"></td>
-        <td id="LC1744" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1745" class="blob-num js-line-number" data-line-number="1745"></td>
-        <td id="LC1745" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_char_lit</span>(<span class="pl-st">void</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L1746" class="blob-num js-line-number" data-line-number="1746"></td>
-        <td id="LC1746" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">mpc_expect</span>(<span class="pl-s3">mpc_between</span>(<span class="pl-s3">mpc_or</span>(<span class="pl-c1">2</span>, <span class="pl-s3">mpc_escape</span>(), <span class="pl-s3">mpc_any</span>()), <span class="pl-s3">free</span>, <span class="pl-s1"><span class="pl-pds">&quot;</span>&#39;<span class="pl-pds">&quot;</span></span>, <span class="pl-s1"><span class="pl-pds">&quot;</span>&#39;<span class="pl-pds">&quot;</span></span>), <span class="pl-s1"><span class="pl-pds">&quot;</span>char<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L1747" class="blob-num js-line-number" data-line-number="1747"></td>
-        <td id="LC1747" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1748" class="blob-num js-line-number" data-line-number="1748"></td>
-        <td id="LC1748" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1749" class="blob-num js-line-number" data-line-number="1749"></td>
-        <td id="LC1749" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_string_lit</span>(<span class="pl-st">void</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L1750" class="blob-num js-line-number" data-line-number="1750"></td>
-        <td id="LC1750" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *strchar = <span class="pl-s3">mpc_or</span>(<span class="pl-c1">2</span>, <span class="pl-s3">mpc_escape</span>(), <span class="pl-s3">mpc_noneof</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-cce">\&quot;</span><span class="pl-pds">&quot;</span></span>));</td>
-      </tr>
-      <tr>
-        <td id="L1751" class="blob-num js-line-number" data-line-number="1751"></td>
-        <td id="LC1751" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">mpc_expect</span>(<span class="pl-s3">mpc_between</span>(<span class="pl-s3">mpc_many</span>(mpcf_strfold, strchar), <span class="pl-s3">free</span>, <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-cce">\&quot;</span><span class="pl-pds">&quot;</span></span>, <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-cce">\&quot;</span><span class="pl-pds">&quot;</span></span>), <span class="pl-s1"><span class="pl-pds">&quot;</span>string<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L1752" class="blob-num js-line-number" data-line-number="1752"></td>
-        <td id="LC1752" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1753" class="blob-num js-line-number" data-line-number="1753"></td>
-        <td id="LC1753" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1754" class="blob-num js-line-number" data-line-number="1754"></td>
-        <td id="LC1754" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_regex_lit</span>(<span class="pl-st">void</span>) {  </td>
-      </tr>
-      <tr>
-        <td id="L1755" class="blob-num js-line-number" data-line-number="1755"></td>
-        <td id="LC1755" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *regexchar = <span class="pl-s3">mpc_or</span>(<span class="pl-c1">2</span>, <span class="pl-s3">mpc_escape</span>(), <span class="pl-s3">mpc_noneof</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>/<span class="pl-pds">&quot;</span></span>));</td>
-      </tr>
-      <tr>
-        <td id="L1756" class="blob-num js-line-number" data-line-number="1756"></td>
-        <td id="LC1756" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">mpc_expect</span>(<span class="pl-s3">mpc_between</span>(<span class="pl-s3">mpc_many</span>(mpcf_strfold, regexchar), <span class="pl-s3">free</span>, <span class="pl-s1"><span class="pl-pds">&quot;</span>/<span class="pl-pds">&quot;</span></span>, <span class="pl-s1"><span class="pl-pds">&quot;</span>/<span class="pl-pds">&quot;</span></span>), <span class="pl-s1"><span class="pl-pds">&quot;</span>regex<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L1757" class="blob-num js-line-number" data-line-number="1757"></td>
-        <td id="LC1757" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1758" class="blob-num js-line-number" data-line-number="1758"></td>
-        <td id="LC1758" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1759" class="blob-num js-line-number" data-line-number="1759"></td>
-        <td id="LC1759" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_ident</span>(<span class="pl-st">void</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L1760" class="blob-num js-line-number" data-line-number="1760"></td>
-        <td id="LC1760" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p0, *p1; </td>
-      </tr>
-      <tr>
-        <td id="L1761" class="blob-num js-line-number" data-line-number="1761"></td>
-        <td id="LC1761" class="blob-code js-file-line">  p0 = <span class="pl-s3">mpc_or</span>(<span class="pl-c1">2</span>, <span class="pl-s3">mpc_alpha</span>(), <span class="pl-s3">mpc_underscore</span>());</td>
-      </tr>
-      <tr>
-        <td id="L1762" class="blob-num js-line-number" data-line-number="1762"></td>
-        <td id="LC1762" class="blob-code js-file-line">  p1 = <span class="pl-s3">mpc_many</span>(mpcf_strfold, <span class="pl-s3">mpc_alphanum</span>()); </td>
-      </tr>
-      <tr>
-        <td id="L1763" class="blob-num js-line-number" data-line-number="1763"></td>
-        <td id="LC1763" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">mpc_and</span>(<span class="pl-c1">2</span>, mpcf_strfold, p0, p1, <span class="pl-s3">free</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1764" class="blob-num js-line-number" data-line-number="1764"></td>
-        <td id="LC1764" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1765" class="blob-num js-line-number" data-line-number="1765"></td>
-        <td id="LC1765" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1766" class="blob-num js-line-number" data-line-number="1766"></td>
-        <td id="LC1766" class="blob-code js-file-line"><span class="pl-c">/*</span></td>
-      </tr>
-      <tr>
-        <td id="L1767" class="blob-num js-line-number" data-line-number="1767"></td>
-        <td id="LC1767" class="blob-code js-file-line"><span class="pl-c">** Useful Parsers</span></td>
-      </tr>
-      <tr>
-        <td id="L1768" class="blob-num js-line-number" data-line-number="1768"></td>
-        <td id="LC1768" class="blob-code js-file-line"><span class="pl-c">*/</span></td>
-      </tr>
-      <tr>
-        <td id="L1769" class="blob-num js-line-number" data-line-number="1769"></td>
-        <td id="LC1769" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1770" class="blob-num js-line-number" data-line-number="1770"></td>
-        <td id="LC1770" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_startwith</span>(<span class="pl-s3">mpc_parser_t</span> *a) { <span class="pl-k">return</span> <span class="pl-s3">mpc_and</span>(<span class="pl-c1">2</span>, mpcf_snd, <span class="pl-s3">mpc_soi</span>(), a, mpcf_dtor_null); }</td>
-      </tr>
-      <tr>
-        <td id="L1771" class="blob-num js-line-number" data-line-number="1771"></td>
-        <td id="LC1771" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_endwith</span>(<span class="pl-s3">mpc_parser_t</span> *a, <span class="pl-s3">mpc_dtor_t</span> da) { <span class="pl-k">return</span> <span class="pl-s3">mpc_and</span>(<span class="pl-c1">2</span>, mpcf_fst, a, <span class="pl-s3">mpc_eoi</span>(), da); }</td>
-      </tr>
-      <tr>
-        <td id="L1772" class="blob-num js-line-number" data-line-number="1772"></td>
-        <td id="LC1772" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_whole</span>(<span class="pl-s3">mpc_parser_t</span> *a, <span class="pl-s3">mpc_dtor_t</span> da) { <span class="pl-k">return</span> <span class="pl-s3">mpc_and</span>(<span class="pl-c1">3</span>, mpcf_snd, <span class="pl-s3">mpc_soi</span>(), a, <span class="pl-s3">mpc_eoi</span>(), mpcf_dtor_null, da); }</td>
-      </tr>
-      <tr>
-        <td id="L1773" class="blob-num js-line-number" data-line-number="1773"></td>
-        <td id="LC1773" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1774" class="blob-num js-line-number" data-line-number="1774"></td>
-        <td id="LC1774" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_stripl</span>(<span class="pl-s3">mpc_parser_t</span> *a) { <span class="pl-k">return</span> <span class="pl-s3">mpc_and</span>(<span class="pl-c1">2</span>, mpcf_snd, <span class="pl-s3">mpc_blank</span>(), a, mpcf_dtor_null); }</td>
-      </tr>
-      <tr>
-        <td id="L1775" class="blob-num js-line-number" data-line-number="1775"></td>
-        <td id="LC1775" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_stripr</span>(<span class="pl-s3">mpc_parser_t</span> *a) { <span class="pl-k">return</span> <span class="pl-s3">mpc_and</span>(<span class="pl-c1">2</span>, mpcf_fst, a, <span class="pl-s3">mpc_blank</span>(), mpcf_dtor_null); }</td>
-      </tr>
-      <tr>
-        <td id="L1776" class="blob-num js-line-number" data-line-number="1776"></td>
-        <td id="LC1776" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_strip</span>(<span class="pl-s3">mpc_parser_t</span> *a) { <span class="pl-k">return</span> <span class="pl-s3">mpc_and</span>(<span class="pl-c1">3</span>, mpcf_snd, <span class="pl-s3">mpc_blank</span>(), a, <span class="pl-s3">mpc_blank</span>(), mpcf_dtor_null, mpcf_dtor_null); }</td>
-      </tr>
-      <tr>
-        <td id="L1777" class="blob-num js-line-number" data-line-number="1777"></td>
-        <td id="LC1777" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_tok</span>(<span class="pl-s3">mpc_parser_t</span> *a) { <span class="pl-k">return</span> <span class="pl-s3">mpc_and</span>(<span class="pl-c1">2</span>, mpcf_fst, a, <span class="pl-s3">mpc_blank</span>(), mpcf_dtor_null); }</td>
-      </tr>
-      <tr>
-        <td id="L1778" class="blob-num js-line-number" data-line-number="1778"></td>
-        <td id="LC1778" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_sym</span>(<span class="pl-s">const</span> <span class="pl-st">char</span> *s) { <span class="pl-k">return</span> <span class="pl-s3">mpc_tok</span>(<span class="pl-s3">mpc_string</span>(s)); }</td>
-      </tr>
-      <tr>
-        <td id="L1779" class="blob-num js-line-number" data-line-number="1779"></td>
-        <td id="LC1779" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1780" class="blob-num js-line-number" data-line-number="1780"></td>
-        <td id="LC1780" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_total</span>(<span class="pl-s3">mpc_parser_t</span> *a, <span class="pl-s3">mpc_dtor_t</span> da) { <span class="pl-k">return</span> <span class="pl-s3">mpc_whole</span>(<span class="pl-s3">mpc_strip</span>(a), da); }</td>
-      </tr>
-      <tr>
-        <td id="L1781" class="blob-num js-line-number" data-line-number="1781"></td>
-        <td id="LC1781" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1782" class="blob-num js-line-number" data-line-number="1782"></td>
-        <td id="LC1782" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_between</span>(<span class="pl-s3">mpc_parser_t</span> *a, <span class="pl-s3">mpc_dtor_t</span> ad, <span class="pl-s">const</span> <span class="pl-st">char</span> *o, <span class="pl-s">const</span> <span class="pl-st">char</span> *c) {</td>
-      </tr>
-      <tr>
-        <td id="L1783" class="blob-num js-line-number" data-line-number="1783"></td>
-        <td id="LC1783" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">mpc_and</span>(<span class="pl-c1">3</span>, mpcf_snd_free,</td>
-      </tr>
-      <tr>
-        <td id="L1784" class="blob-num js-line-number" data-line-number="1784"></td>
-        <td id="LC1784" class="blob-code js-file-line">    <span class="pl-s3">mpc_string</span>(o), a, <span class="pl-s3">mpc_string</span>(c),</td>
-      </tr>
-      <tr>
-        <td id="L1785" class="blob-num js-line-number" data-line-number="1785"></td>
-        <td id="LC1785" class="blob-code js-file-line">    <span class="pl-s3">free</span>, ad);</td>
-      </tr>
-      <tr>
-        <td id="L1786" class="blob-num js-line-number" data-line-number="1786"></td>
-        <td id="LC1786" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1787" class="blob-num js-line-number" data-line-number="1787"></td>
-        <td id="LC1787" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1788" class="blob-num js-line-number" data-line-number="1788"></td>
-        <td id="LC1788" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_parens</span>(<span class="pl-s3">mpc_parser_t</span> *a, <span class="pl-s3">mpc_dtor_t</span> ad)   { <span class="pl-k">return</span> <span class="pl-s3">mpc_between</span>(a, ad, <span class="pl-s1"><span class="pl-pds">&quot;</span>(<span class="pl-pds">&quot;</span></span>, <span class="pl-s1"><span class="pl-pds">&quot;</span>)<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1789" class="blob-num js-line-number" data-line-number="1789"></td>
-        <td id="LC1789" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_braces</span>(<span class="pl-s3">mpc_parser_t</span> *a, <span class="pl-s3">mpc_dtor_t</span> ad)   { <span class="pl-k">return</span> <span class="pl-s3">mpc_between</span>(a, ad, <span class="pl-s1"><span class="pl-pds">&quot;</span>&lt;<span class="pl-pds">&quot;</span></span>, <span class="pl-s1"><span class="pl-pds">&quot;</span>&gt;<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1790" class="blob-num js-line-number" data-line-number="1790"></td>
-        <td id="LC1790" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_brackets</span>(<span class="pl-s3">mpc_parser_t</span> *a, <span class="pl-s3">mpc_dtor_t</span> ad) { <span class="pl-k">return</span> <span class="pl-s3">mpc_between</span>(a, ad, <span class="pl-s1"><span class="pl-pds">&quot;</span>{<span class="pl-pds">&quot;</span></span>, <span class="pl-s1"><span class="pl-pds">&quot;</span>}<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1791" class="blob-num js-line-number" data-line-number="1791"></td>
-        <td id="LC1791" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_squares</span>(<span class="pl-s3">mpc_parser_t</span> *a, <span class="pl-s3">mpc_dtor_t</span> ad)  { <span class="pl-k">return</span> <span class="pl-s3">mpc_between</span>(a, ad, <span class="pl-s1"><span class="pl-pds">&quot;</span>[<span class="pl-pds">&quot;</span></span>, <span class="pl-s1"><span class="pl-pds">&quot;</span>]<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1792" class="blob-num js-line-number" data-line-number="1792"></td>
-        <td id="LC1792" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1793" class="blob-num js-line-number" data-line-number="1793"></td>
-        <td id="LC1793" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_tok_between</span>(<span class="pl-s3">mpc_parser_t</span> *a, <span class="pl-s3">mpc_dtor_t</span> ad, <span class="pl-s">const</span> <span class="pl-st">char</span> *o, <span class="pl-s">const</span> <span class="pl-st">char</span> *c) {</td>
-      </tr>
-      <tr>
-        <td id="L1794" class="blob-num js-line-number" data-line-number="1794"></td>
-        <td id="LC1794" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">mpc_and</span>(<span class="pl-c1">3</span>, mpcf_snd_free,</td>
-      </tr>
-      <tr>
-        <td id="L1795" class="blob-num js-line-number" data-line-number="1795"></td>
-        <td id="LC1795" class="blob-code js-file-line">    <span class="pl-s3">mpc_sym</span>(o), <span class="pl-s3">mpc_tok</span>(a), <span class="pl-s3">mpc_sym</span>(c),</td>
-      </tr>
-      <tr>
-        <td id="L1796" class="blob-num js-line-number" data-line-number="1796"></td>
-        <td id="LC1796" class="blob-code js-file-line">    <span class="pl-s3">free</span>, ad);</td>
-      </tr>
-      <tr>
-        <td id="L1797" class="blob-num js-line-number" data-line-number="1797"></td>
-        <td id="LC1797" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1798" class="blob-num js-line-number" data-line-number="1798"></td>
-        <td id="LC1798" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1799" class="blob-num js-line-number" data-line-number="1799"></td>
-        <td id="LC1799" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_tok_parens</span>(<span class="pl-s3">mpc_parser_t</span> *a, <span class="pl-s3">mpc_dtor_t</span> ad)   { <span class="pl-k">return</span> <span class="pl-s3">mpc_tok_between</span>(a, ad, <span class="pl-s1"><span class="pl-pds">&quot;</span>(<span class="pl-pds">&quot;</span></span>, <span class="pl-s1"><span class="pl-pds">&quot;</span>)<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1800" class="blob-num js-line-number" data-line-number="1800"></td>
-        <td id="LC1800" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_tok_braces</span>(<span class="pl-s3">mpc_parser_t</span> *a, <span class="pl-s3">mpc_dtor_t</span> ad)   { <span class="pl-k">return</span> <span class="pl-s3">mpc_tok_between</span>(a, ad, <span class="pl-s1"><span class="pl-pds">&quot;</span>&lt;<span class="pl-pds">&quot;</span></span>, <span class="pl-s1"><span class="pl-pds">&quot;</span>&gt;<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1801" class="blob-num js-line-number" data-line-number="1801"></td>
-        <td id="LC1801" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_tok_brackets</span>(<span class="pl-s3">mpc_parser_t</span> *a, <span class="pl-s3">mpc_dtor_t</span> ad) { <span class="pl-k">return</span> <span class="pl-s3">mpc_tok_between</span>(a, ad, <span class="pl-s1"><span class="pl-pds">&quot;</span>{<span class="pl-pds">&quot;</span></span>, <span class="pl-s1"><span class="pl-pds">&quot;</span>}<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1802" class="blob-num js-line-number" data-line-number="1802"></td>
-        <td id="LC1802" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_tok_squares</span>(<span class="pl-s3">mpc_parser_t</span> *a, <span class="pl-s3">mpc_dtor_t</span> ad)  { <span class="pl-k">return</span> <span class="pl-s3">mpc_tok_between</span>(a, ad, <span class="pl-s1"><span class="pl-pds">&quot;</span>[<span class="pl-pds">&quot;</span></span>, <span class="pl-s1"><span class="pl-pds">&quot;</span>]<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1803" class="blob-num js-line-number" data-line-number="1803"></td>
-        <td id="LC1803" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1804" class="blob-num js-line-number" data-line-number="1804"></td>
-        <td id="LC1804" class="blob-code js-file-line"><span class="pl-c">/*</span></td>
-      </tr>
-      <tr>
-        <td id="L1805" class="blob-num js-line-number" data-line-number="1805"></td>
-        <td id="LC1805" class="blob-code js-file-line"><span class="pl-c">** Regular Expression Parsers</span></td>
-      </tr>
-      <tr>
-        <td id="L1806" class="blob-num js-line-number" data-line-number="1806"></td>
-        <td id="LC1806" class="blob-code js-file-line"><span class="pl-c">*/</span></td>
-      </tr>
-      <tr>
-        <td id="L1807" class="blob-num js-line-number" data-line-number="1807"></td>
-        <td id="LC1807" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1808" class="blob-num js-line-number" data-line-number="1808"></td>
-        <td id="LC1808" class="blob-code js-file-line"><span class="pl-c">/*</span></td>
-      </tr>
-      <tr>
-        <td id="L1809" class="blob-num js-line-number" data-line-number="1809"></td>
-        <td id="LC1809" class="blob-code js-file-line"><span class="pl-c">** So here is a cute bootstrapping.</span></td>
-      </tr>
-      <tr>
-        <td id="L1810" class="blob-num js-line-number" data-line-number="1810"></td>
-        <td id="LC1810" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L1811" class="blob-num js-line-number" data-line-number="1811"></td>
-        <td id="LC1811" class="blob-code js-file-line"><span class="pl-c">** I&#39;m using the previously defined</span></td>
-      </tr>
-      <tr>
-        <td id="L1812" class="blob-num js-line-number" data-line-number="1812"></td>
-        <td id="LC1812" class="blob-code js-file-line"><span class="pl-c">** mpc constructs and functions to</span></td>
-      </tr>
-      <tr>
-        <td id="L1813" class="blob-num js-line-number" data-line-number="1813"></td>
-        <td id="LC1813" class="blob-code js-file-line"><span class="pl-c">** parse the user regex string and</span></td>
-      </tr>
-      <tr>
-        <td id="L1814" class="blob-num js-line-number" data-line-number="1814"></td>
-        <td id="LC1814" class="blob-code js-file-line"><span class="pl-c">** construct a parser from it.</span></td>
-      </tr>
-      <tr>
-        <td id="L1815" class="blob-num js-line-number" data-line-number="1815"></td>
-        <td id="LC1815" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L1816" class="blob-num js-line-number" data-line-number="1816"></td>
-        <td id="LC1816" class="blob-code js-file-line"><span class="pl-c">** As it turns out lots of the standard</span></td>
-      </tr>
-      <tr>
-        <td id="L1817" class="blob-num js-line-number" data-line-number="1817"></td>
-        <td id="LC1817" class="blob-code js-file-line"><span class="pl-c">** mpc functions look a lot like `fold`</span></td>
-      </tr>
-      <tr>
-        <td id="L1818" class="blob-num js-line-number" data-line-number="1818"></td>
-        <td id="LC1818" class="blob-code js-file-line"><span class="pl-c">** functions and so can be used indirectly</span></td>
-      </tr>
-      <tr>
-        <td id="L1819" class="blob-num js-line-number" data-line-number="1819"></td>
-        <td id="LC1819" class="blob-code js-file-line"><span class="pl-c">** by many of the parsing functions to build</span></td>
-      </tr>
-      <tr>
-        <td id="L1820" class="blob-num js-line-number" data-line-number="1820"></td>
-        <td id="LC1820" class="blob-code js-file-line"><span class="pl-c">** a parser directly - as we are parsing.</span></td>
-      </tr>
-      <tr>
-        <td id="L1821" class="blob-num js-line-number" data-line-number="1821"></td>
-        <td id="LC1821" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L1822" class="blob-num js-line-number" data-line-number="1822"></td>
-        <td id="LC1822" class="blob-code js-file-line"><span class="pl-c">** This is certainly something that</span></td>
-      </tr>
-      <tr>
-        <td id="L1823" class="blob-num js-line-number" data-line-number="1823"></td>
-        <td id="LC1823" class="blob-code js-file-line"><span class="pl-c">** would be less elegant/interesting </span></td>
-      </tr>
-      <tr>
-        <td id="L1824" class="blob-num js-line-number" data-line-number="1824"></td>
-        <td id="LC1824" class="blob-code js-file-line"><span class="pl-c">** in a two-phase parser which first</span></td>
-      </tr>
-      <tr>
-        <td id="L1825" class="blob-num js-line-number" data-line-number="1825"></td>
-        <td id="LC1825" class="blob-code js-file-line"><span class="pl-c">** builds an AST and then traverses it</span></td>
-      </tr>
-      <tr>
-        <td id="L1826" class="blob-num js-line-number" data-line-number="1826"></td>
-        <td id="LC1826" class="blob-code js-file-line"><span class="pl-c">** to generate the object.</span></td>
-      </tr>
-      <tr>
-        <td id="L1827" class="blob-num js-line-number" data-line-number="1827"></td>
-        <td id="LC1827" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L1828" class="blob-num js-line-number" data-line-number="1828"></td>
-        <td id="LC1828" class="blob-code js-file-line"><span class="pl-c">** This whole thing acts as a great</span></td>
-      </tr>
-      <tr>
-        <td id="L1829" class="blob-num js-line-number" data-line-number="1829"></td>
-        <td id="LC1829" class="blob-code js-file-line"><span class="pl-c">** case study for how trivial it can be</span></td>
-      </tr>
-      <tr>
-        <td id="L1830" class="blob-num js-line-number" data-line-number="1830"></td>
-        <td id="LC1830" class="blob-code js-file-line"><span class="pl-c">** to write a great parser in a few</span></td>
-      </tr>
-      <tr>
-        <td id="L1831" class="blob-num js-line-number" data-line-number="1831"></td>
-        <td id="LC1831" class="blob-code js-file-line"><span class="pl-c">** lines of code using mpc.</span></td>
-      </tr>
-      <tr>
-        <td id="L1832" class="blob-num js-line-number" data-line-number="1832"></td>
-        <td id="LC1832" class="blob-code js-file-line"><span class="pl-c">*/</span></td>
-      </tr>
-      <tr>
-        <td id="L1833" class="blob-num js-line-number" data-line-number="1833"></td>
-        <td id="LC1833" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1834" class="blob-num js-line-number" data-line-number="1834"></td>
-        <td id="LC1834" class="blob-code js-file-line"><span class="pl-c">/*</span></td>
-      </tr>
-      <tr>
-        <td id="L1835" class="blob-num js-line-number" data-line-number="1835"></td>
-        <td id="LC1835" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L1836" class="blob-num js-line-number" data-line-number="1836"></td>
-        <td id="LC1836" class="blob-code js-file-line"><span class="pl-c">**  ### Regular Expression Grammar</span></td>
-      </tr>
-      <tr>
-        <td id="L1837" class="blob-num js-line-number" data-line-number="1837"></td>
-        <td id="LC1837" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L1838" class="blob-num js-line-number" data-line-number="1838"></td>
-        <td id="LC1838" class="blob-code js-file-line"><span class="pl-c">**      &lt;regex&gt; : &lt;term&gt; | (&lt;term&gt; &quot;|&quot; &lt;regex&gt;)</span></td>
-      </tr>
-      <tr>
-        <td id="L1839" class="blob-num js-line-number" data-line-number="1839"></td>
-        <td id="LC1839" class="blob-code js-file-line"><span class="pl-c">**     </span></td>
-      </tr>
-      <tr>
-        <td id="L1840" class="blob-num js-line-number" data-line-number="1840"></td>
-        <td id="LC1840" class="blob-code js-file-line"><span class="pl-c">**      &lt;term&gt; : &lt;factor&gt;*</span></td>
-      </tr>
-      <tr>
-        <td id="L1841" class="blob-num js-line-number" data-line-number="1841"></td>
-        <td id="LC1841" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L1842" class="blob-num js-line-number" data-line-number="1842"></td>
-        <td id="LC1842" class="blob-code js-file-line"><span class="pl-c">**      &lt;factor&gt; : &lt;base&gt;</span></td>
-      </tr>
-      <tr>
-        <td id="L1843" class="blob-num js-line-number" data-line-number="1843"></td>
-        <td id="LC1843" class="blob-code js-file-line"><span class="pl-c">**               | &lt;base&gt; &quot;*&quot;</span></td>
-      </tr>
-      <tr>
-        <td id="L1844" class="blob-num js-line-number" data-line-number="1844"></td>
-        <td id="LC1844" class="blob-code js-file-line"><span class="pl-c">**               | &lt;base&gt; &quot;+&quot;</span></td>
-      </tr>
-      <tr>
-        <td id="L1845" class="blob-num js-line-number" data-line-number="1845"></td>
-        <td id="LC1845" class="blob-code js-file-line"><span class="pl-c">**               | &lt;base&gt; &quot;?&quot;</span></td>
-      </tr>
-      <tr>
-        <td id="L1846" class="blob-num js-line-number" data-line-number="1846"></td>
-        <td id="LC1846" class="blob-code js-file-line"><span class="pl-c">**               | &lt;base&gt; &quot;{&quot; &lt;digits&gt; &quot;}&quot;</span></td>
-      </tr>
-      <tr>
-        <td id="L1847" class="blob-num js-line-number" data-line-number="1847"></td>
-        <td id="LC1847" class="blob-code js-file-line"><span class="pl-c">**           </span></td>
-      </tr>
-      <tr>
-        <td id="L1848" class="blob-num js-line-number" data-line-number="1848"></td>
-        <td id="LC1848" class="blob-code js-file-line"><span class="pl-c">**      &lt;base&gt; : &lt;char&gt;</span></td>
-      </tr>
-      <tr>
-        <td id="L1849" class="blob-num js-line-number" data-line-number="1849"></td>
-        <td id="LC1849" class="blob-code js-file-line"><span class="pl-c">**             | &quot;\&quot; &lt;char&gt;</span></td>
-      </tr>
-      <tr>
-        <td id="L1850" class="blob-num js-line-number" data-line-number="1850"></td>
-        <td id="LC1850" class="blob-code js-file-line"><span class="pl-c">**             | &quot;(&quot; &lt;regex&gt; &quot;)&quot;</span></td>
-      </tr>
-      <tr>
-        <td id="L1851" class="blob-num js-line-number" data-line-number="1851"></td>
-        <td id="LC1851" class="blob-code js-file-line"><span class="pl-c">**             | &quot;[&quot; &lt;range&gt; &quot;]&quot;</span></td>
-      </tr>
-      <tr>
-        <td id="L1852" class="blob-num js-line-number" data-line-number="1852"></td>
-        <td id="LC1852" class="blob-code js-file-line"><span class="pl-c">*/</span></td>
-      </tr>
-      <tr>
-        <td id="L1853" class="blob-num js-line-number" data-line-number="1853"></td>
-        <td id="LC1853" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1854" class="blob-num js-line-number" data-line-number="1854"></td>
-        <td id="LC1854" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_re_or</span>(<span class="pl-st">int</span> n, <span class="pl-s3">mpc_val_t</span> **xs) {</td>
-      </tr>
-      <tr>
-        <td id="L1855" class="blob-num js-line-number" data-line-number="1855"></td>
-        <td id="LC1855" class="blob-code js-file-line">  (<span class="pl-st">void</span>) n;</td>
-      </tr>
-      <tr>
-        <td id="L1856" class="blob-num js-line-number" data-line-number="1856"></td>
-        <td id="LC1856" class="blob-code js-file-line">  <span class="pl-k">if</span> (xs[<span class="pl-c1">1</span>] == <span class="pl-c1">NULL</span>) { <span class="pl-k">return</span> xs[<span class="pl-c1">0</span>]; }</td>
-      </tr>
-      <tr>
-        <td id="L1857" class="blob-num js-line-number" data-line-number="1857"></td>
-        <td id="LC1857" class="blob-code js-file-line">  <span class="pl-k">else</span> { <span class="pl-k">return</span> <span class="pl-s3">mpc_or</span>(<span class="pl-c1">2</span>, xs[<span class="pl-c1">0</span>], xs[<span class="pl-c1">1</span>]); }</td>
-      </tr>
-      <tr>
-        <td id="L1858" class="blob-num js-line-number" data-line-number="1858"></td>
-        <td id="LC1858" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1859" class="blob-num js-line-number" data-line-number="1859"></td>
-        <td id="LC1859" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1860" class="blob-num js-line-number" data-line-number="1860"></td>
-        <td id="LC1860" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_re_and</span>(<span class="pl-st">int</span> n, <span class="pl-s3">mpc_val_t</span> **xs) {</td>
-      </tr>
-      <tr>
-        <td id="L1861" class="blob-num js-line-number" data-line-number="1861"></td>
-        <td id="LC1861" class="blob-code js-file-line">  <span class="pl-st">int</span> i;</td>
-      </tr>
-      <tr>
-        <td id="L1862" class="blob-num js-line-number" data-line-number="1862"></td>
-        <td id="LC1862" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-s3">mpc_lift</span>(mpcf_ctor_str);</td>
-      </tr>
-      <tr>
-        <td id="L1863" class="blob-num js-line-number" data-line-number="1863"></td>
-        <td id="LC1863" class="blob-code js-file-line">  <span class="pl-k">for</span> (i = <span class="pl-c1">0</span>; i &lt; n; i++) {</td>
-      </tr>
-      <tr>
-        <td id="L1864" class="blob-num js-line-number" data-line-number="1864"></td>
-        <td id="LC1864" class="blob-code js-file-line">    p = <span class="pl-s3">mpc_and</span>(<span class="pl-c1">2</span>, mpcf_strfold, p, xs[i], <span class="pl-s3">free</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1865" class="blob-num js-line-number" data-line-number="1865"></td>
-        <td id="LC1865" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L1866" class="blob-num js-line-number" data-line-number="1866"></td>
-        <td id="LC1866" class="blob-code js-file-line">  <span class="pl-k">return</span> p;</td>
-      </tr>
-      <tr>
-        <td id="L1867" class="blob-num js-line-number" data-line-number="1867"></td>
-        <td id="LC1867" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1868" class="blob-num js-line-number" data-line-number="1868"></td>
-        <td id="LC1868" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1869" class="blob-num js-line-number" data-line-number="1869"></td>
-        <td id="LC1869" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_re_repeat</span>(<span class="pl-st">int</span> n, <span class="pl-s3">mpc_val_t</span> **xs) {</td>
-      </tr>
-      <tr>
-        <td id="L1870" class="blob-num js-line-number" data-line-number="1870"></td>
-        <td id="LC1870" class="blob-code js-file-line">  <span class="pl-st">int</span> num;</td>
-      </tr>
-      <tr>
-        <td id="L1871" class="blob-num js-line-number" data-line-number="1871"></td>
-        <td id="LC1871" class="blob-code js-file-line">  (<span class="pl-st">void</span>) n;</td>
-      </tr>
-      <tr>
-        <td id="L1872" class="blob-num js-line-number" data-line-number="1872"></td>
-        <td id="LC1872" class="blob-code js-file-line">  <span class="pl-k">if</span> (xs[<span class="pl-c1">1</span>] == <span class="pl-c1">NULL</span>) { <span class="pl-k">return</span> xs[<span class="pl-c1">0</span>]; }</td>
-      </tr>
-      <tr>
-        <td id="L1873" class="blob-num js-line-number" data-line-number="1873"></td>
-        <td id="LC1873" class="blob-code js-file-line">  <span class="pl-k">if</span> (<span class="pl-s3">strcmp</span>(xs[<span class="pl-c1">1</span>], <span class="pl-s1"><span class="pl-pds">&quot;</span>*<span class="pl-pds">&quot;</span></span>) == <span class="pl-c1">0</span>) { <span class="pl-s3">free</span>(xs[<span class="pl-c1">1</span>]); <span class="pl-k">return</span> <span class="pl-s3">mpc_many</span>(mpcf_strfold, xs[<span class="pl-c1">0</span>]); }</td>
-      </tr>
-      <tr>
-        <td id="L1874" class="blob-num js-line-number" data-line-number="1874"></td>
-        <td id="LC1874" class="blob-code js-file-line">  <span class="pl-k">if</span> (<span class="pl-s3">strcmp</span>(xs[<span class="pl-c1">1</span>], <span class="pl-s1"><span class="pl-pds">&quot;</span>+<span class="pl-pds">&quot;</span></span>) == <span class="pl-c1">0</span>) { <span class="pl-s3">free</span>(xs[<span class="pl-c1">1</span>]); <span class="pl-k">return</span> <span class="pl-s3">mpc_many1</span>(mpcf_strfold, xs[<span class="pl-c1">0</span>]); }</td>
-      </tr>
-      <tr>
-        <td id="L1875" class="blob-num js-line-number" data-line-number="1875"></td>
-        <td id="LC1875" class="blob-code js-file-line">  <span class="pl-k">if</span> (<span class="pl-s3">strcmp</span>(xs[<span class="pl-c1">1</span>], <span class="pl-s1"><span class="pl-pds">&quot;</span>?<span class="pl-pds">&quot;</span></span>) == <span class="pl-c1">0</span>) { <span class="pl-s3">free</span>(xs[<span class="pl-c1">1</span>]); <span class="pl-k">return</span> <span class="pl-s3">mpc_maybe_lift</span>(xs[<span class="pl-c1">0</span>], mpcf_ctor_str); }</td>
-      </tr>
-      <tr>
-        <td id="L1876" class="blob-num js-line-number" data-line-number="1876"></td>
-        <td id="LC1876" class="blob-code js-file-line">  num = *(<span class="pl-st">int</span>*)xs[<span class="pl-c1">1</span>];</td>
-      </tr>
-      <tr>
-        <td id="L1877" class="blob-num js-line-number" data-line-number="1877"></td>
-        <td id="LC1877" class="blob-code js-file-line">  <span class="pl-s3">free</span>(xs[<span class="pl-c1">1</span>]);</td>
-      </tr>
-      <tr>
-        <td id="L1878" class="blob-num js-line-number" data-line-number="1878"></td>
-        <td id="LC1878" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1879" class="blob-num js-line-number" data-line-number="1879"></td>
-        <td id="LC1879" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">mpc_count</span>(num, mpcf_strfold, xs[<span class="pl-c1">0</span>], <span class="pl-s3">free</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1880" class="blob-num js-line-number" data-line-number="1880"></td>
-        <td id="LC1880" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1881" class="blob-num js-line-number" data-line-number="1881"></td>
-        <td id="LC1881" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1882" class="blob-num js-line-number" data-line-number="1882"></td>
-        <td id="LC1882" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_re_escape_char</span>(<span class="pl-st">char</span> c) {</td>
-      </tr>
-      <tr>
-        <td id="L1883" class="blob-num js-line-number" data-line-number="1883"></td>
-        <td id="LC1883" class="blob-code js-file-line">  <span class="pl-k">switch</span> (c) {</td>
-      </tr>
-      <tr>
-        <td id="L1884" class="blob-num js-line-number" data-line-number="1884"></td>
-        <td id="LC1884" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span>a<span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s3">mpc_char</span>(<span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-cce">\a</span><span class="pl-pds">&#39;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L1885" class="blob-num js-line-number" data-line-number="1885"></td>
-        <td id="LC1885" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span>f<span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s3">mpc_char</span>(<span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-cce">\f</span><span class="pl-pds">&#39;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L1886" class="blob-num js-line-number" data-line-number="1886"></td>
-        <td id="LC1886" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span>n<span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s3">mpc_char</span>(<span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-cce">\n</span><span class="pl-pds">&#39;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L1887" class="blob-num js-line-number" data-line-number="1887"></td>
-        <td id="LC1887" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span>r<span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s3">mpc_char</span>(<span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-cce">\r</span><span class="pl-pds">&#39;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L1888" class="blob-num js-line-number" data-line-number="1888"></td>
-        <td id="LC1888" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span>t<span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s3">mpc_char</span>(<span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-cce">\t</span><span class="pl-pds">&#39;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L1889" class="blob-num js-line-number" data-line-number="1889"></td>
-        <td id="LC1889" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span>v<span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s3">mpc_char</span>(<span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-cce">\v</span><span class="pl-pds">&#39;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L1890" class="blob-num js-line-number" data-line-number="1890"></td>
-        <td id="LC1890" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span>b<span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s3">mpc_and</span>(<span class="pl-c1">2</span>, mpcf_snd, <span class="pl-s3">mpc_boundary</span>(), <span class="pl-s3">mpc_lift</span>(mpcf_ctor_str), <span class="pl-s3">free</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1891" class="blob-num js-line-number" data-line-number="1891"></td>
-        <td id="LC1891" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span>B<span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s3">mpc_not_lift</span>(<span class="pl-s3">mpc_boundary</span>(), <span class="pl-s3">free</span>, mpcf_ctor_str);</td>
-      </tr>
-      <tr>
-        <td id="L1892" class="blob-num js-line-number" data-line-number="1892"></td>
-        <td id="LC1892" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span>A<span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s3">mpc_and</span>(<span class="pl-c1">2</span>, mpcf_snd, <span class="pl-s3">mpc_soi</span>(), <span class="pl-s3">mpc_lift</span>(mpcf_ctor_str), <span class="pl-s3">free</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1893" class="blob-num js-line-number" data-line-number="1893"></td>
-        <td id="LC1893" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span>Z<span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s3">mpc_and</span>(<span class="pl-c1">2</span>, mpcf_snd, <span class="pl-s3">mpc_eoi</span>(), <span class="pl-s3">mpc_lift</span>(mpcf_ctor_str), <span class="pl-s3">free</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1894" class="blob-num js-line-number" data-line-number="1894"></td>
-        <td id="LC1894" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span>d<span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s3">mpc_digit</span>();</td>
-      </tr>
-      <tr>
-        <td id="L1895" class="blob-num js-line-number" data-line-number="1895"></td>
-        <td id="LC1895" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span>D<span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s3">mpc_not_lift</span>(<span class="pl-s3">mpc_digit</span>(), <span class="pl-s3">free</span>, mpcf_ctor_str);</td>
-      </tr>
-      <tr>
-        <td id="L1896" class="blob-num js-line-number" data-line-number="1896"></td>
-        <td id="LC1896" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span>s<span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s3">mpc_whitespace</span>();</td>
-      </tr>
-      <tr>
-        <td id="L1897" class="blob-num js-line-number" data-line-number="1897"></td>
-        <td id="LC1897" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span>S<span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s3">mpc_not_lift</span>(<span class="pl-s3">mpc_whitespace</span>(), <span class="pl-s3">free</span>, mpcf_ctor_str);</td>
-      </tr>
-      <tr>
-        <td id="L1898" class="blob-num js-line-number" data-line-number="1898"></td>
-        <td id="LC1898" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span>w<span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s3">mpc_alphanum</span>();</td>
-      </tr>
-      <tr>
-        <td id="L1899" class="blob-num js-line-number" data-line-number="1899"></td>
-        <td id="LC1899" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span>W<span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s3">mpc_not_lift</span>(<span class="pl-s3">mpc_alphanum</span>(), <span class="pl-s3">free</span>, mpcf_ctor_str);</td>
-      </tr>
-      <tr>
-        <td id="L1900" class="blob-num js-line-number" data-line-number="1900"></td>
-        <td id="LC1900" class="blob-code js-file-line">    <span class="pl-k">default</span>: <span class="pl-k">return</span> <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L1901" class="blob-num js-line-number" data-line-number="1901"></td>
-        <td id="LC1901" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L1902" class="blob-num js-line-number" data-line-number="1902"></td>
-        <td id="LC1902" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1903" class="blob-num js-line-number" data-line-number="1903"></td>
-        <td id="LC1903" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1904" class="blob-num js-line-number" data-line-number="1904"></td>
-        <td id="LC1904" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_re_escape</span>(<span class="pl-s3">mpc_val_t</span> *x) {</td>
-      </tr>
-      <tr>
-        <td id="L1905" class="blob-num js-line-number" data-line-number="1905"></td>
-        <td id="LC1905" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1906" class="blob-num js-line-number" data-line-number="1906"></td>
-        <td id="LC1906" class="blob-code js-file-line">  <span class="pl-st">char</span> *s = x;</td>
-      </tr>
-      <tr>
-        <td id="L1907" class="blob-num js-line-number" data-line-number="1907"></td>
-        <td id="LC1907" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p;</td>
-      </tr>
-      <tr>
-        <td id="L1908" class="blob-num js-line-number" data-line-number="1908"></td>
-        <td id="LC1908" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1909" class="blob-num js-line-number" data-line-number="1909"></td>
-        <td id="LC1909" class="blob-code js-file-line">  <span class="pl-c">/* Regex Special Characters */</span></td>
-      </tr>
-      <tr>
-        <td id="L1910" class="blob-num js-line-number" data-line-number="1910"></td>
-        <td id="LC1910" class="blob-code js-file-line">  <span class="pl-k">if</span> (s[<span class="pl-c1">0</span>] == <span class="pl-s1"><span class="pl-pds">&#39;</span>.<span class="pl-pds">&#39;</span></span>) { <span class="pl-s3">free</span>(s); <span class="pl-k">return</span> <span class="pl-s3">mpc_any</span>(); }</td>
-      </tr>
-      <tr>
-        <td id="L1911" class="blob-num js-line-number" data-line-number="1911"></td>
-        <td id="LC1911" class="blob-code js-file-line">  <span class="pl-k">if</span> (s[<span class="pl-c1">0</span>] == <span class="pl-s1"><span class="pl-pds">&#39;</span>^<span class="pl-pds">&#39;</span></span>) { <span class="pl-s3">free</span>(s); <span class="pl-k">return</span> <span class="pl-s3">mpc_and</span>(<span class="pl-c1">2</span>, mpcf_snd, <span class="pl-s3">mpc_soi</span>(), <span class="pl-s3">mpc_lift</span>(mpcf_ctor_str), <span class="pl-s3">free</span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1912" class="blob-num js-line-number" data-line-number="1912"></td>
-        <td id="LC1912" class="blob-code js-file-line">  <span class="pl-k">if</span> (s[<span class="pl-c1">0</span>] == <span class="pl-s1"><span class="pl-pds">&#39;</span>$<span class="pl-pds">&#39;</span></span>) { <span class="pl-s3">free</span>(s); <span class="pl-k">return</span> <span class="pl-s3">mpc_and</span>(<span class="pl-c1">2</span>, mpcf_snd, <span class="pl-s3">mpc_eoi</span>(), <span class="pl-s3">mpc_lift</span>(mpcf_ctor_str), <span class="pl-s3">free</span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1913" class="blob-num js-line-number" data-line-number="1913"></td>
-        <td id="LC1913" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1914" class="blob-num js-line-number" data-line-number="1914"></td>
-        <td id="LC1914" class="blob-code js-file-line">  <span class="pl-c">/* Regex Escape */</span></td>
-      </tr>
-      <tr>
-        <td id="L1915" class="blob-num js-line-number" data-line-number="1915"></td>
-        <td id="LC1915" class="blob-code js-file-line">  <span class="pl-k">if</span> (s[<span class="pl-c1">0</span>] == <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-cce">\\</span><span class="pl-pds">&#39;</span></span>) {</td>
-      </tr>
-      <tr>
-        <td id="L1916" class="blob-num js-line-number" data-line-number="1916"></td>
-        <td id="LC1916" class="blob-code js-file-line">    p = <span class="pl-s3">mpc_re_escape_char</span>(s[<span class="pl-c1">1</span>]);</td>
-      </tr>
-      <tr>
-        <td id="L1917" class="blob-num js-line-number" data-line-number="1917"></td>
-        <td id="LC1917" class="blob-code js-file-line">    p = (p == <span class="pl-c1">NULL</span>) ? <span class="pl-s3">mpc_char</span>(s[<span class="pl-c1">1</span>]) : p;</td>
-      </tr>
-      <tr>
-        <td id="L1918" class="blob-num js-line-number" data-line-number="1918"></td>
-        <td id="LC1918" class="blob-code js-file-line">    <span class="pl-s3">free</span>(s);</td>
-      </tr>
-      <tr>
-        <td id="L1919" class="blob-num js-line-number" data-line-number="1919"></td>
-        <td id="LC1919" class="blob-code js-file-line">    <span class="pl-k">return</span> p;</td>
-      </tr>
-      <tr>
-        <td id="L1920" class="blob-num js-line-number" data-line-number="1920"></td>
-        <td id="LC1920" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L1921" class="blob-num js-line-number" data-line-number="1921"></td>
-        <td id="LC1921" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1922" class="blob-num js-line-number" data-line-number="1922"></td>
-        <td id="LC1922" class="blob-code js-file-line">  <span class="pl-c">/* Regex Standard */</span></td>
-      </tr>
-      <tr>
-        <td id="L1923" class="blob-num js-line-number" data-line-number="1923"></td>
-        <td id="LC1923" class="blob-code js-file-line">  p = <span class="pl-s3">mpc_char</span>(s[<span class="pl-c1">0</span>]);</td>
-      </tr>
-      <tr>
-        <td id="L1924" class="blob-num js-line-number" data-line-number="1924"></td>
-        <td id="LC1924" class="blob-code js-file-line">  <span class="pl-s3">free</span>(s);</td>
-      </tr>
-      <tr>
-        <td id="L1925" class="blob-num js-line-number" data-line-number="1925"></td>
-        <td id="LC1925" class="blob-code js-file-line">  <span class="pl-k">return</span> p;</td>
-      </tr>
-      <tr>
-        <td id="L1926" class="blob-num js-line-number" data-line-number="1926"></td>
-        <td id="LC1926" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1927" class="blob-num js-line-number" data-line-number="1927"></td>
-        <td id="LC1927" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1928" class="blob-num js-line-number" data-line-number="1928"></td>
-        <td id="LC1928" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s">const</span> <span class="pl-st">char</span> *<span class="pl-en">mpc_re_range_escape_char</span>(<span class="pl-st">char</span> c) {</td>
-      </tr>
-      <tr>
-        <td id="L1929" class="blob-num js-line-number" data-line-number="1929"></td>
-        <td id="LC1929" class="blob-code js-file-line">  <span class="pl-k">switch</span> (c) {</td>
-      </tr>
-      <tr>
-        <td id="L1930" class="blob-num js-line-number" data-line-number="1930"></td>
-        <td id="LC1930" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span>-<span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s1"><span class="pl-pds">&quot;</span>-<span class="pl-pds">&quot;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L1931" class="blob-num js-line-number" data-line-number="1931"></td>
-        <td id="LC1931" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span>a<span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-cce">\a</span><span class="pl-pds">&quot;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L1932" class="blob-num js-line-number" data-line-number="1932"></td>
-        <td id="LC1932" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span>f<span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-cce">\f</span><span class="pl-pds">&quot;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L1933" class="blob-num js-line-number" data-line-number="1933"></td>
-        <td id="LC1933" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span>n<span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-cce">\n</span><span class="pl-pds">&quot;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L1934" class="blob-num js-line-number" data-line-number="1934"></td>
-        <td id="LC1934" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span>r<span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-cce">\r</span><span class="pl-pds">&quot;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L1935" class="blob-num js-line-number" data-line-number="1935"></td>
-        <td id="LC1935" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span>t<span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-cce">\t</span><span class="pl-pds">&quot;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L1936" class="blob-num js-line-number" data-line-number="1936"></td>
-        <td id="LC1936" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span>v<span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-cce">\v</span><span class="pl-pds">&quot;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L1937" class="blob-num js-line-number" data-line-number="1937"></td>
-        <td id="LC1937" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span>b<span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-cce">\b</span><span class="pl-pds">&quot;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L1938" class="blob-num js-line-number" data-line-number="1938"></td>
-        <td id="LC1938" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span>d<span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s1"><span class="pl-pds">&quot;</span>0123456789<span class="pl-pds">&quot;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L1939" class="blob-num js-line-number" data-line-number="1939"></td>
-        <td id="LC1939" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span>s<span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s1"><span class="pl-pds">&quot;</span> <span class="pl-cce">\f\n\r\t\v</span><span class="pl-pds">&quot;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L1940" class="blob-num js-line-number" data-line-number="1940"></td>
-        <td id="LC1940" class="blob-code js-file-line">    <span class="pl-k">case</span> <span class="pl-s1"><span class="pl-pds">&#39;</span>w<span class="pl-pds">&#39;</span></span>: <span class="pl-k">return</span> <span class="pl-s1"><span class="pl-pds">&quot;</span>abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_<span class="pl-pds">&quot;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L1941" class="blob-num js-line-number" data-line-number="1941"></td>
-        <td id="LC1941" class="blob-code js-file-line">    <span class="pl-k">default</span>: <span class="pl-k">return</span> <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L1942" class="blob-num js-line-number" data-line-number="1942"></td>
-        <td id="LC1942" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L1943" class="blob-num js-line-number" data-line-number="1943"></td>
-        <td id="LC1943" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L1944" class="blob-num js-line-number" data-line-number="1944"></td>
-        <td id="LC1944" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L1945" class="blob-num js-line-number" data-line-number="1945"></td>
-        <td id="LC1945" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_re_range</span>(<span class="pl-s3">mpc_val_t</span> *x) {</td>
-      </tr>
-      <tr>
-        <td id="L1946" class="blob-num js-line-number" data-line-number="1946"></td>
-        <td id="LC1946" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1947" class="blob-num js-line-number" data-line-number="1947"></td>
-        <td id="LC1947" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *out;</td>
-      </tr>
-      <tr>
-        <td id="L1948" class="blob-num js-line-number" data-line-number="1948"></td>
-        <td id="LC1948" class="blob-code js-file-line">  <span class="pl-st">char</span> *range = <span class="pl-s3">calloc</span>(<span class="pl-c1">1</span>,<span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1949" class="blob-num js-line-number" data-line-number="1949"></td>
-        <td id="LC1949" class="blob-code js-file-line">  <span class="pl-s">const</span> <span class="pl-st">char</span> *tmp = <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L1950" class="blob-num js-line-number" data-line-number="1950"></td>
-        <td id="LC1950" class="blob-code js-file-line">  <span class="pl-s">const</span> <span class="pl-st">char</span> *s = x;</td>
-      </tr>
-      <tr>
-        <td id="L1951" class="blob-num js-line-number" data-line-number="1951"></td>
-        <td id="LC1951" class="blob-code js-file-line">  <span class="pl-st">int</span> comp = s[<span class="pl-c1">0</span>] == <span class="pl-s1"><span class="pl-pds">&#39;</span>^<span class="pl-pds">&#39;</span></span> ? <span class="pl-c1">1</span> : <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L1952" class="blob-num js-line-number" data-line-number="1952"></td>
-        <td id="LC1952" class="blob-code js-file-line">  <span class="pl-s3">size_t</span> start, end;</td>
-      </tr>
-      <tr>
-        <td id="L1953" class="blob-num js-line-number" data-line-number="1953"></td>
-        <td id="LC1953" class="blob-code js-file-line">  <span class="pl-s3">size_t</span> i, j;</td>
-      </tr>
-      <tr>
-        <td id="L1954" class="blob-num js-line-number" data-line-number="1954"></td>
-        <td id="LC1954" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1955" class="blob-num js-line-number" data-line-number="1955"></td>
-        <td id="LC1955" class="blob-code js-file-line">  <span class="pl-k">if</span> (s[<span class="pl-c1">0</span>] == <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-ii">\0</span><span class="pl-pds">&#39;</span></span>) { <span class="pl-s3">free</span>(x); <span class="pl-k">return</span> <span class="pl-s3">mpc_fail</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>Invalid Regex Range Expression<span class="pl-pds">&quot;</span></span>); } </td>
-      </tr>
-      <tr>
-        <td id="L1956" class="blob-num js-line-number" data-line-number="1956"></td>
-        <td id="LC1956" class="blob-code js-file-line">  <span class="pl-k">if</span> (s[<span class="pl-c1">0</span>] == <span class="pl-s1"><span class="pl-pds">&#39;</span>^<span class="pl-pds">&#39;</span></span> &amp;&amp; </td>
-      </tr>
-      <tr>
-        <td id="L1957" class="blob-num js-line-number" data-line-number="1957"></td>
-        <td id="LC1957" class="blob-code js-file-line">      s[<span class="pl-c1">1</span>] == <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-ii">\0</span><span class="pl-pds">&#39;</span></span>) { <span class="pl-s3">free</span>(x); <span class="pl-k">return</span> <span class="pl-s3">mpc_fail</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>Invalid Regex Range Expression<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L1958" class="blob-num js-line-number" data-line-number="1958"></td>
-        <td id="LC1958" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1959" class="blob-num js-line-number" data-line-number="1959"></td>
-        <td id="LC1959" class="blob-code js-file-line">  <span class="pl-k">for</span> (i = comp; i &lt; <span class="pl-s3">strlen</span>(s); i++){</td>
-      </tr>
-      <tr>
-        <td id="L1960" class="blob-num js-line-number" data-line-number="1960"></td>
-        <td id="LC1960" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L1961" class="blob-num js-line-number" data-line-number="1961"></td>
-        <td id="LC1961" class="blob-code js-file-line">    <span class="pl-c">/* Regex Range Escape */</span></td>
-      </tr>
-      <tr>
-        <td id="L1962" class="blob-num js-line-number" data-line-number="1962"></td>
-        <td id="LC1962" class="blob-code js-file-line">    <span class="pl-k">if</span> (s[i] == <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-cce">\\</span><span class="pl-pds">&#39;</span></span>) {</td>
-      </tr>
-      <tr>
-        <td id="L1963" class="blob-num js-line-number" data-line-number="1963"></td>
-        <td id="LC1963" class="blob-code js-file-line">      tmp = <span class="pl-s3">mpc_re_range_escape_char</span>(s[i+<span class="pl-c1">1</span>]);</td>
-      </tr>
-      <tr>
-        <td id="L1964" class="blob-num js-line-number" data-line-number="1964"></td>
-        <td id="LC1964" class="blob-code js-file-line">      <span class="pl-k">if</span> (tmp != <span class="pl-c1">NULL</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L1965" class="blob-num js-line-number" data-line-number="1965"></td>
-        <td id="LC1965" class="blob-code js-file-line">        range = <span class="pl-s3">realloc</span>(range, <span class="pl-s3">strlen</span>(range) + <span class="pl-s3">strlen</span>(tmp) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1966" class="blob-num js-line-number" data-line-number="1966"></td>
-        <td id="LC1966" class="blob-code js-file-line">        <span class="pl-s3">strcat</span>(range, tmp);</td>
-      </tr>
-      <tr>
-        <td id="L1967" class="blob-num js-line-number" data-line-number="1967"></td>
-        <td id="LC1967" class="blob-code js-file-line">      } <span class="pl-k">else</span> {</td>
-      </tr>
-      <tr>
-        <td id="L1968" class="blob-num js-line-number" data-line-number="1968"></td>
-        <td id="LC1968" class="blob-code js-file-line">        range = <span class="pl-s3">realloc</span>(range, <span class="pl-s3">strlen</span>(range) + <span class="pl-c1">1</span> + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1969" class="blob-num js-line-number" data-line-number="1969"></td>
-        <td id="LC1969" class="blob-code js-file-line">        range[<span class="pl-s3">strlen</span>(range) + <span class="pl-c1">1</span>] = <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-ii">\0</span><span class="pl-pds">&#39;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L1970" class="blob-num js-line-number" data-line-number="1970"></td>
-        <td id="LC1970" class="blob-code js-file-line">        range[<span class="pl-s3">strlen</span>(range) + <span class="pl-c1">0</span>] = s[i+<span class="pl-c1">1</span>];      </td>
-      </tr>
-      <tr>
-        <td id="L1971" class="blob-num js-line-number" data-line-number="1971"></td>
-        <td id="LC1971" class="blob-code js-file-line">      }</td>
-      </tr>
-      <tr>
-        <td id="L1972" class="blob-num js-line-number" data-line-number="1972"></td>
-        <td id="LC1972" class="blob-code js-file-line">      i++;</td>
-      </tr>
-      <tr>
-        <td id="L1973" class="blob-num js-line-number" data-line-number="1973"></td>
-        <td id="LC1973" class="blob-code js-file-line">    }</td>
-      </tr>
-      <tr>
-        <td id="L1974" class="blob-num js-line-number" data-line-number="1974"></td>
-        <td id="LC1974" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L1975" class="blob-num js-line-number" data-line-number="1975"></td>
-        <td id="LC1975" class="blob-code js-file-line">    <span class="pl-c">/* Regex Range...Range */</span></td>
-      </tr>
-      <tr>
-        <td id="L1976" class="blob-num js-line-number" data-line-number="1976"></td>
-        <td id="LC1976" class="blob-code js-file-line">    <span class="pl-k">else</span> <span class="pl-k">if</span> (s[i] == <span class="pl-s1"><span class="pl-pds">&#39;</span>-<span class="pl-pds">&#39;</span></span>) {</td>
-      </tr>
-      <tr>
-        <td id="L1977" class="blob-num js-line-number" data-line-number="1977"></td>
-        <td id="LC1977" class="blob-code js-file-line">      <span class="pl-k">if</span> (s[i+<span class="pl-c1">1</span>] == <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-ii">\0</span><span class="pl-pds">&#39;</span></span> || i == <span class="pl-c1">0</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L1978" class="blob-num js-line-number" data-line-number="1978"></td>
-        <td id="LC1978" class="blob-code js-file-line">          range = <span class="pl-s3">realloc</span>(range, <span class="pl-s3">strlen</span>(range) + <span class="pl-s3">strlen</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>-<span class="pl-pds">&quot;</span></span>) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1979" class="blob-num js-line-number" data-line-number="1979"></td>
-        <td id="LC1979" class="blob-code js-file-line">          <span class="pl-s3">strcat</span>(range, <span class="pl-s1"><span class="pl-pds">&quot;</span>-<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L1980" class="blob-num js-line-number" data-line-number="1980"></td>
-        <td id="LC1980" class="blob-code js-file-line">      } <span class="pl-k">else</span> {</td>
-      </tr>
-      <tr>
-        <td id="L1981" class="blob-num js-line-number" data-line-number="1981"></td>
-        <td id="LC1981" class="blob-code js-file-line">        start = s[i-<span class="pl-c1">1</span>]+<span class="pl-c1">1</span>;</td>
-      </tr>
-      <tr>
-        <td id="L1982" class="blob-num js-line-number" data-line-number="1982"></td>
-        <td id="LC1982" class="blob-code js-file-line">        end = s[i+<span class="pl-c1">1</span>]-<span class="pl-c1">1</span>;</td>
-      </tr>
-      <tr>
-        <td id="L1983" class="blob-num js-line-number" data-line-number="1983"></td>
-        <td id="LC1983" class="blob-code js-file-line">        <span class="pl-k">for</span> (j = start; j &lt;= end; j++) {</td>
-      </tr>
-      <tr>
-        <td id="L1984" class="blob-num js-line-number" data-line-number="1984"></td>
-        <td id="LC1984" class="blob-code js-file-line">          range = <span class="pl-s3">realloc</span>(range, <span class="pl-s3">strlen</span>(range) + <span class="pl-c1">1</span> + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1985" class="blob-num js-line-number" data-line-number="1985"></td>
-        <td id="LC1985" class="blob-code js-file-line">          range[<span class="pl-s3">strlen</span>(range) + <span class="pl-c1">1</span>] = <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-ii">\0</span><span class="pl-pds">&#39;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L1986" class="blob-num js-line-number" data-line-number="1986"></td>
-        <td id="LC1986" class="blob-code js-file-line">          range[<span class="pl-s3">strlen</span>(range) + <span class="pl-c1">0</span>] = j;</td>
-      </tr>
-      <tr>
-        <td id="L1987" class="blob-num js-line-number" data-line-number="1987"></td>
-        <td id="LC1987" class="blob-code js-file-line">        }        </td>
-      </tr>
-      <tr>
-        <td id="L1988" class="blob-num js-line-number" data-line-number="1988"></td>
-        <td id="LC1988" class="blob-code js-file-line">      }</td>
-      </tr>
-      <tr>
-        <td id="L1989" class="blob-num js-line-number" data-line-number="1989"></td>
-        <td id="LC1989" class="blob-code js-file-line">    }</td>
-      </tr>
-      <tr>
-        <td id="L1990" class="blob-num js-line-number" data-line-number="1990"></td>
-        <td id="LC1990" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L1991" class="blob-num js-line-number" data-line-number="1991"></td>
-        <td id="LC1991" class="blob-code js-file-line">    <span class="pl-c">/* Regex Range Normal */</span></td>
-      </tr>
-      <tr>
-        <td id="L1992" class="blob-num js-line-number" data-line-number="1992"></td>
-        <td id="LC1992" class="blob-code js-file-line">    <span class="pl-k">else</span> {</td>
-      </tr>
-      <tr>
-        <td id="L1993" class="blob-num js-line-number" data-line-number="1993"></td>
-        <td id="LC1993" class="blob-code js-file-line">      range = <span class="pl-s3">realloc</span>(range, <span class="pl-s3">strlen</span>(range) + <span class="pl-c1">1</span> + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L1994" class="blob-num js-line-number" data-line-number="1994"></td>
-        <td id="LC1994" class="blob-code js-file-line">      range[<span class="pl-s3">strlen</span>(range) + <span class="pl-c1">1</span>] = <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-ii">\0</span><span class="pl-pds">&#39;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L1995" class="blob-num js-line-number" data-line-number="1995"></td>
-        <td id="LC1995" class="blob-code js-file-line">      range[<span class="pl-s3">strlen</span>(range) + <span class="pl-c1">0</span>] = s[i];</td>
-      </tr>
-      <tr>
-        <td id="L1996" class="blob-num js-line-number" data-line-number="1996"></td>
-        <td id="LC1996" class="blob-code js-file-line">    }</td>
-      </tr>
-      <tr>
-        <td id="L1997" class="blob-num js-line-number" data-line-number="1997"></td>
-        <td id="LC1997" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L1998" class="blob-num js-line-number" data-line-number="1998"></td>
-        <td id="LC1998" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L1999" class="blob-num js-line-number" data-line-number="1999"></td>
-        <td id="LC1999" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2000" class="blob-num js-line-number" data-line-number="2000"></td>
-        <td id="LC2000" class="blob-code js-file-line">  out = comp == <span class="pl-c1">1</span> ? <span class="pl-s3">mpc_noneof</span>(range) : <span class="pl-s3">mpc_oneof</span>(range);</td>
-      </tr>
-      <tr>
-        <td id="L2001" class="blob-num js-line-number" data-line-number="2001"></td>
-        <td id="LC2001" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2002" class="blob-num js-line-number" data-line-number="2002"></td>
-        <td id="LC2002" class="blob-code js-file-line">  <span class="pl-s3">free</span>(x);</td>
-      </tr>
-      <tr>
-        <td id="L2003" class="blob-num js-line-number" data-line-number="2003"></td>
-        <td id="LC2003" class="blob-code js-file-line">  <span class="pl-s3">free</span>(range);</td>
-      </tr>
-      <tr>
-        <td id="L2004" class="blob-num js-line-number" data-line-number="2004"></td>
-        <td id="LC2004" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2005" class="blob-num js-line-number" data-line-number="2005"></td>
-        <td id="LC2005" class="blob-code js-file-line">  <span class="pl-k">return</span> out;</td>
-      </tr>
-      <tr>
-        <td id="L2006" class="blob-num js-line-number" data-line-number="2006"></td>
-        <td id="LC2006" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2007" class="blob-num js-line-number" data-line-number="2007"></td>
-        <td id="LC2007" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2008" class="blob-num js-line-number" data-line-number="2008"></td>
-        <td id="LC2008" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpc_re</span>(<span class="pl-s">const</span> <span class="pl-st">char</span> *re) {</td>
-      </tr>
-      <tr>
-        <td id="L2009" class="blob-num js-line-number" data-line-number="2009"></td>
-        <td id="LC2009" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2010" class="blob-num js-line-number" data-line-number="2010"></td>
-        <td id="LC2010" class="blob-code js-file-line">  <span class="pl-st">char</span> *err_msg;</td>
-      </tr>
-      <tr>
-        <td id="L2011" class="blob-num js-line-number" data-line-number="2011"></td>
-        <td id="LC2011" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *err_out;</td>
-      </tr>
-      <tr>
-        <td id="L2012" class="blob-num js-line-number" data-line-number="2012"></td>
-        <td id="LC2012" class="blob-code js-file-line">  <span class="pl-s3">mpc_result_t</span> r;</td>
-      </tr>
-      <tr>
-        <td id="L2013" class="blob-num js-line-number" data-line-number="2013"></td>
-        <td id="LC2013" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *Regex, *Term, *Factor, *Base, *Range, *RegexEnclose; </td>
-      </tr>
-      <tr>
-        <td id="L2014" class="blob-num js-line-number" data-line-number="2014"></td>
-        <td id="LC2014" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2015" class="blob-num js-line-number" data-line-number="2015"></td>
-        <td id="LC2015" class="blob-code js-file-line">  Regex  = <span class="pl-s3">mpc_new</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>regex<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L2016" class="blob-num js-line-number" data-line-number="2016"></td>
-        <td id="LC2016" class="blob-code js-file-line">  Term   = <span class="pl-s3">mpc_new</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>term<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L2017" class="blob-num js-line-number" data-line-number="2017"></td>
-        <td id="LC2017" class="blob-code js-file-line">  Factor = <span class="pl-s3">mpc_new</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>factor<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L2018" class="blob-num js-line-number" data-line-number="2018"></td>
-        <td id="LC2018" class="blob-code js-file-line">  Base   = <span class="pl-s3">mpc_new</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>base<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L2019" class="blob-num js-line-number" data-line-number="2019"></td>
-        <td id="LC2019" class="blob-code js-file-line">  Range  = <span class="pl-s3">mpc_new</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>range<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L2020" class="blob-num js-line-number" data-line-number="2020"></td>
-        <td id="LC2020" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2021" class="blob-num js-line-number" data-line-number="2021"></td>
-        <td id="LC2021" class="blob-code js-file-line">  <span class="pl-s3">mpc_define</span>(Regex, <span class="pl-s3">mpc_and</span>(<span class="pl-c1">2</span>, mpcf_re_or,</td>
-      </tr>
-      <tr>
-        <td id="L2022" class="blob-num js-line-number" data-line-number="2022"></td>
-        <td id="LC2022" class="blob-code js-file-line">    Term, </td>
-      </tr>
-      <tr>
-        <td id="L2023" class="blob-num js-line-number" data-line-number="2023"></td>
-        <td id="LC2023" class="blob-code js-file-line">    <span class="pl-s3">mpc_maybe</span>(<span class="pl-s3">mpc_and</span>(<span class="pl-c1">2</span>, mpcf_snd_free, <span class="pl-s3">mpc_char</span>(<span class="pl-s1"><span class="pl-pds">&#39;</span>|<span class="pl-pds">&#39;</span></span>), Regex, <span class="pl-s3">free</span>)),</td>
-      </tr>
-      <tr>
-        <td id="L2024" class="blob-num js-line-number" data-line-number="2024"></td>
-        <td id="LC2024" class="blob-code js-file-line">    (<span class="pl-s3">mpc_dtor_t</span>)mpc_delete</td>
-      </tr>
-      <tr>
-        <td id="L2025" class="blob-num js-line-number" data-line-number="2025"></td>
-        <td id="LC2025" class="blob-code js-file-line">  ));</td>
-      </tr>
-      <tr>
-        <td id="L2026" class="blob-num js-line-number" data-line-number="2026"></td>
-        <td id="LC2026" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2027" class="blob-num js-line-number" data-line-number="2027"></td>
-        <td id="LC2027" class="blob-code js-file-line">  <span class="pl-s3">mpc_define</span>(Term, <span class="pl-s3">mpc_many</span>(mpcf_re_and, Factor));</td>
-      </tr>
-      <tr>
-        <td id="L2028" class="blob-num js-line-number" data-line-number="2028"></td>
-        <td id="LC2028" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2029" class="blob-num js-line-number" data-line-number="2029"></td>
-        <td id="LC2029" class="blob-code js-file-line">  <span class="pl-s3">mpc_define</span>(Factor, <span class="pl-s3">mpc_and</span>(<span class="pl-c1">2</span>, mpcf_re_repeat,</td>
-      </tr>
-      <tr>
-        <td id="L2030" class="blob-num js-line-number" data-line-number="2030"></td>
-        <td id="LC2030" class="blob-code js-file-line">    Base,</td>
-      </tr>
-      <tr>
-        <td id="L2031" class="blob-num js-line-number" data-line-number="2031"></td>
-        <td id="LC2031" class="blob-code js-file-line">    <span class="pl-s3">mpc_or</span>(<span class="pl-c1">5</span>,</td>
-      </tr>
-      <tr>
-        <td id="L2032" class="blob-num js-line-number" data-line-number="2032"></td>
-        <td id="LC2032" class="blob-code js-file-line">      <span class="pl-s3">mpc_char</span>(<span class="pl-s1"><span class="pl-pds">&#39;</span>*<span class="pl-pds">&#39;</span></span>), <span class="pl-s3">mpc_char</span>(<span class="pl-s1"><span class="pl-pds">&#39;</span>+<span class="pl-pds">&#39;</span></span>), <span class="pl-s3">mpc_char</span>(<span class="pl-s1"><span class="pl-pds">&#39;</span>?<span class="pl-pds">&#39;</span></span>),</td>
-      </tr>
-      <tr>
-        <td id="L2033" class="blob-num js-line-number" data-line-number="2033"></td>
-        <td id="LC2033" class="blob-code js-file-line">      <span class="pl-s3">mpc_brackets</span>(<span class="pl-s3">mpc_int</span>(), <span class="pl-s3">free</span>),</td>
-      </tr>
-      <tr>
-        <td id="L2034" class="blob-num js-line-number" data-line-number="2034"></td>
-        <td id="LC2034" class="blob-code js-file-line">      <span class="pl-s3">mpc_pass</span>()),</td>
-      </tr>
-      <tr>
-        <td id="L2035" class="blob-num js-line-number" data-line-number="2035"></td>
-        <td id="LC2035" class="blob-code js-file-line">    (<span class="pl-s3">mpc_dtor_t</span>)mpc_delete</td>
-      </tr>
-      <tr>
-        <td id="L2036" class="blob-num js-line-number" data-line-number="2036"></td>
-        <td id="LC2036" class="blob-code js-file-line">  ));</td>
-      </tr>
-      <tr>
-        <td id="L2037" class="blob-num js-line-number" data-line-number="2037"></td>
-        <td id="LC2037" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2038" class="blob-num js-line-number" data-line-number="2038"></td>
-        <td id="LC2038" class="blob-code js-file-line">  <span class="pl-s3">mpc_define</span>(Base, <span class="pl-s3">mpc_or</span>(<span class="pl-c1">4</span>,</td>
-      </tr>
-      <tr>
-        <td id="L2039" class="blob-num js-line-number" data-line-number="2039"></td>
-        <td id="LC2039" class="blob-code js-file-line">    <span class="pl-s3">mpc_parens</span>(Regex, (<span class="pl-s3">mpc_dtor_t</span>)mpc_delete),</td>
-      </tr>
-      <tr>
-        <td id="L2040" class="blob-num js-line-number" data-line-number="2040"></td>
-        <td id="LC2040" class="blob-code js-file-line">    <span class="pl-s3">mpc_squares</span>(Range, (<span class="pl-s3">mpc_dtor_t</span>)mpc_delete),</td>
-      </tr>
-      <tr>
-        <td id="L2041" class="blob-num js-line-number" data-line-number="2041"></td>
-        <td id="LC2041" class="blob-code js-file-line">    <span class="pl-s3">mpc_apply</span>(<span class="pl-s3">mpc_escape</span>(), mpcf_re_escape),</td>
-      </tr>
-      <tr>
-        <td id="L2042" class="blob-num js-line-number" data-line-number="2042"></td>
-        <td id="LC2042" class="blob-code js-file-line">    <span class="pl-s3">mpc_apply</span>(<span class="pl-s3">mpc_noneof</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>)|<span class="pl-pds">&quot;</span></span>), mpcf_re_escape)</td>
-      </tr>
-      <tr>
-        <td id="L2043" class="blob-num js-line-number" data-line-number="2043"></td>
-        <td id="LC2043" class="blob-code js-file-line">  ));</td>
-      </tr>
-      <tr>
-        <td id="L2044" class="blob-num js-line-number" data-line-number="2044"></td>
-        <td id="LC2044" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2045" class="blob-num js-line-number" data-line-number="2045"></td>
-        <td id="LC2045" class="blob-code js-file-line">  <span class="pl-s3">mpc_define</span>(Range, <span class="pl-s3">mpc_apply</span>(</td>
-      </tr>
-      <tr>
-        <td id="L2046" class="blob-num js-line-number" data-line-number="2046"></td>
-        <td id="LC2046" class="blob-code js-file-line">    <span class="pl-s3">mpc_many</span>(mpcf_strfold, <span class="pl-s3">mpc_or</span>(<span class="pl-c1">2</span>, <span class="pl-s3">mpc_escape</span>(), <span class="pl-s3">mpc_noneof</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>]<span class="pl-pds">&quot;</span></span>))),</td>
-      </tr>
-      <tr>
-        <td id="L2047" class="blob-num js-line-number" data-line-number="2047"></td>
-        <td id="LC2047" class="blob-code js-file-line">    mpcf_re_range</td>
-      </tr>
-      <tr>
-        <td id="L2048" class="blob-num js-line-number" data-line-number="2048"></td>
-        <td id="LC2048" class="blob-code js-file-line">  ));</td>
-      </tr>
-      <tr>
-        <td id="L2049" class="blob-num js-line-number" data-line-number="2049"></td>
-        <td id="LC2049" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2050" class="blob-num js-line-number" data-line-number="2050"></td>
-        <td id="LC2050" class="blob-code js-file-line">  RegexEnclose = <span class="pl-s3">mpc_whole</span>(<span class="pl-s3">mpc_predictive</span>(Regex), (<span class="pl-s3">mpc_dtor_t</span>)mpc_delete);</td>
-      </tr>
-      <tr>
-        <td id="L2051" class="blob-num js-line-number" data-line-number="2051"></td>
-        <td id="LC2051" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2052" class="blob-num js-line-number" data-line-number="2052"></td>
-        <td id="LC2052" class="blob-code js-file-line">  <span class="pl-k">if</span>(!<span class="pl-s3">mpc_parse</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>&lt;mpc_re_compiler&gt;<span class="pl-pds">&quot;</span></span>, re, RegexEnclose, &amp;r)) {</td>
-      </tr>
-      <tr>
-        <td id="L2053" class="blob-num js-line-number" data-line-number="2053"></td>
-        <td id="LC2053" class="blob-code js-file-line">    err_msg = <span class="pl-s3">mpc_err_string</span>(r.<span class="pl-vo">error</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2054" class="blob-num js-line-number" data-line-number="2054"></td>
-        <td id="LC2054" class="blob-code js-file-line">    err_out = <span class="pl-s3">mpc_failf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>Invalid Regex: <span class="pl-c1">%s</span><span class="pl-pds">&quot;</span></span>, err_msg);</td>
-      </tr>
-      <tr>
-        <td id="L2055" class="blob-num js-line-number" data-line-number="2055"></td>
-        <td id="LC2055" class="blob-code js-file-line">    <span class="pl-s3">mpc_err_delete</span>(r.<span class="pl-vo">error</span>);  </td>
-      </tr>
-      <tr>
-        <td id="L2056" class="blob-num js-line-number" data-line-number="2056"></td>
-        <td id="LC2056" class="blob-code js-file-line">    <span class="pl-s3">free</span>(err_msg);</td>
-      </tr>
-      <tr>
-        <td id="L2057" class="blob-num js-line-number" data-line-number="2057"></td>
-        <td id="LC2057" class="blob-code js-file-line">    r.<span class="pl-vo">output</span> = err_out;</td>
-      </tr>
-      <tr>
-        <td id="L2058" class="blob-num js-line-number" data-line-number="2058"></td>
-        <td id="LC2058" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L2059" class="blob-num js-line-number" data-line-number="2059"></td>
-        <td id="LC2059" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2060" class="blob-num js-line-number" data-line-number="2060"></td>
-        <td id="LC2060" class="blob-code js-file-line">  <span class="pl-s3">mpc_delete</span>(RegexEnclose);</td>
-      </tr>
-      <tr>
-        <td id="L2061" class="blob-num js-line-number" data-line-number="2061"></td>
-        <td id="LC2061" class="blob-code js-file-line">  <span class="pl-s3">mpc_cleanup</span>(<span class="pl-c1">5</span>, Regex, Term, Factor, Base, Range);</td>
-      </tr>
-      <tr>
-        <td id="L2062" class="blob-num js-line-number" data-line-number="2062"></td>
-        <td id="LC2062" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2063" class="blob-num js-line-number" data-line-number="2063"></td>
-        <td id="LC2063" class="blob-code js-file-line">  <span class="pl-k">return</span> r.<span class="pl-vo">output</span>;</td>
-      </tr>
-      <tr>
-        <td id="L2064" class="blob-num js-line-number" data-line-number="2064"></td>
-        <td id="LC2064" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2065" class="blob-num js-line-number" data-line-number="2065"></td>
-        <td id="LC2065" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2066" class="blob-num js-line-number" data-line-number="2066"></td>
-        <td id="LC2066" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2067" class="blob-num js-line-number" data-line-number="2067"></td>
-        <td id="LC2067" class="blob-code js-file-line"><span class="pl-c">/*</span></td>
-      </tr>
-      <tr>
-        <td id="L2068" class="blob-num js-line-number" data-line-number="2068"></td>
-        <td id="LC2068" class="blob-code js-file-line"><span class="pl-c">** Common Fold Functions</span></td>
-      </tr>
-      <tr>
-        <td id="L2069" class="blob-num js-line-number" data-line-number="2069"></td>
-        <td id="LC2069" class="blob-code js-file-line"><span class="pl-c">*/</span></td>
-      </tr>
-      <tr>
-        <td id="L2070" class="blob-num js-line-number" data-line-number="2070"></td>
-        <td id="LC2070" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2071" class="blob-num js-line-number" data-line-number="2071"></td>
-        <td id="LC2071" class="blob-code js-file-line"><span class="pl-st">void</span> <span class="pl-en">mpcf_dtor_null</span>(<span class="pl-s3">mpc_val_t</span> *x) { (<span class="pl-st">void</span>) x; <span class="pl-k">return</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L2072" class="blob-num js-line-number" data-line-number="2072"></td>
-        <td id="LC2072" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2073" class="blob-num js-line-number" data-line-number="2073"></td>
-        <td id="LC2073" class="blob-code js-file-line"><span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_ctor_null</span>(<span class="pl-st">void</span>) { <span class="pl-k">return</span> <span class="pl-c1">NULL</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L2074" class="blob-num js-line-number" data-line-number="2074"></td>
-        <td id="LC2074" class="blob-code js-file-line"><span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_ctor_str</span>(<span class="pl-st">void</span>) { <span class="pl-k">return</span> <span class="pl-s3">calloc</span>(<span class="pl-c1">1</span>, <span class="pl-c1">1</span>); }</td>
-      </tr>
-      <tr>
-        <td id="L2075" class="blob-num js-line-number" data-line-number="2075"></td>
-        <td id="LC2075" class="blob-code js-file-line"><span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_free</span>(<span class="pl-s3">mpc_val_t</span> *x) { <span class="pl-s3">free</span>(x); <span class="pl-k">return</span> <span class="pl-c1">NULL</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L2076" class="blob-num js-line-number" data-line-number="2076"></td>
-        <td id="LC2076" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2077" class="blob-num js-line-number" data-line-number="2077"></td>
-        <td id="LC2077" class="blob-code js-file-line"><span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_int</span>(<span class="pl-s3">mpc_val_t</span> *x) {</td>
-      </tr>
-      <tr>
-        <td id="L2078" class="blob-num js-line-number" data-line-number="2078"></td>
-        <td id="LC2078" class="blob-code js-file-line">  <span class="pl-st">int</span> *y = <span class="pl-s3">malloc</span>(<span class="pl-k">sizeof</span>(<span class="pl-st">int</span>));</td>
-      </tr>
-      <tr>
-        <td id="L2079" class="blob-num js-line-number" data-line-number="2079"></td>
-        <td id="LC2079" class="blob-code js-file-line">  *y = <span class="pl-s3">strtol</span>(x, <span class="pl-c1">NULL</span>, <span class="pl-c1">10</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2080" class="blob-num js-line-number" data-line-number="2080"></td>
-        <td id="LC2080" class="blob-code js-file-line">  <span class="pl-s3">free</span>(x);</td>
-      </tr>
-      <tr>
-        <td id="L2081" class="blob-num js-line-number" data-line-number="2081"></td>
-        <td id="LC2081" class="blob-code js-file-line">  <span class="pl-k">return</span> y;</td>
-      </tr>
-      <tr>
-        <td id="L2082" class="blob-num js-line-number" data-line-number="2082"></td>
-        <td id="LC2082" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2083" class="blob-num js-line-number" data-line-number="2083"></td>
-        <td id="LC2083" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2084" class="blob-num js-line-number" data-line-number="2084"></td>
-        <td id="LC2084" class="blob-code js-file-line"><span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_hex</span>(<span class="pl-s3">mpc_val_t</span> *x) {</td>
-      </tr>
-      <tr>
-        <td id="L2085" class="blob-num js-line-number" data-line-number="2085"></td>
-        <td id="LC2085" class="blob-code js-file-line">  <span class="pl-st">int</span> *y = <span class="pl-s3">malloc</span>(<span class="pl-k">sizeof</span>(<span class="pl-st">int</span>));</td>
-      </tr>
-      <tr>
-        <td id="L2086" class="blob-num js-line-number" data-line-number="2086"></td>
-        <td id="LC2086" class="blob-code js-file-line">  *y = <span class="pl-s3">strtol</span>(x, <span class="pl-c1">NULL</span>, <span class="pl-c1">16</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2087" class="blob-num js-line-number" data-line-number="2087"></td>
-        <td id="LC2087" class="blob-code js-file-line">  <span class="pl-s3">free</span>(x);</td>
-      </tr>
-      <tr>
-        <td id="L2088" class="blob-num js-line-number" data-line-number="2088"></td>
-        <td id="LC2088" class="blob-code js-file-line">  <span class="pl-k">return</span> y;</td>
-      </tr>
-      <tr>
-        <td id="L2089" class="blob-num js-line-number" data-line-number="2089"></td>
-        <td id="LC2089" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2090" class="blob-num js-line-number" data-line-number="2090"></td>
-        <td id="LC2090" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2091" class="blob-num js-line-number" data-line-number="2091"></td>
-        <td id="LC2091" class="blob-code js-file-line"><span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_oct</span>(<span class="pl-s3">mpc_val_t</span> *x) {</td>
-      </tr>
-      <tr>
-        <td id="L2092" class="blob-num js-line-number" data-line-number="2092"></td>
-        <td id="LC2092" class="blob-code js-file-line">  <span class="pl-st">int</span> *y = <span class="pl-s3">malloc</span>(<span class="pl-k">sizeof</span>(<span class="pl-st">int</span>));</td>
-      </tr>
-      <tr>
-        <td id="L2093" class="blob-num js-line-number" data-line-number="2093"></td>
-        <td id="LC2093" class="blob-code js-file-line">  *y = <span class="pl-s3">strtol</span>(x, <span class="pl-c1">NULL</span>, <span class="pl-c1">8</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2094" class="blob-num js-line-number" data-line-number="2094"></td>
-        <td id="LC2094" class="blob-code js-file-line">  <span class="pl-s3">free</span>(x);</td>
-      </tr>
-      <tr>
-        <td id="L2095" class="blob-num js-line-number" data-line-number="2095"></td>
-        <td id="LC2095" class="blob-code js-file-line">  <span class="pl-k">return</span> y;</td>
-      </tr>
-      <tr>
-        <td id="L2096" class="blob-num js-line-number" data-line-number="2096"></td>
-        <td id="LC2096" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2097" class="blob-num js-line-number" data-line-number="2097"></td>
-        <td id="LC2097" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2098" class="blob-num js-line-number" data-line-number="2098"></td>
-        <td id="LC2098" class="blob-code js-file-line"><span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_float</span>(<span class="pl-s3">mpc_val_t</span> *x) {</td>
-      </tr>
-      <tr>
-        <td id="L2099" class="blob-num js-line-number" data-line-number="2099"></td>
-        <td id="LC2099" class="blob-code js-file-line">  <span class="pl-st">float</span>* y = <span class="pl-s3">malloc</span>(<span class="pl-k">sizeof</span>(<span class="pl-st">float</span>));</td>
-      </tr>
-      <tr>
-        <td id="L2100" class="blob-num js-line-number" data-line-number="2100"></td>
-        <td id="LC2100" class="blob-code js-file-line">  *y = <span class="pl-s3">strtod</span>(x, <span class="pl-c1">NULL</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2101" class="blob-num js-line-number" data-line-number="2101"></td>
-        <td id="LC2101" class="blob-code js-file-line">  <span class="pl-s3">free</span>(x);</td>
-      </tr>
-      <tr>
-        <td id="L2102" class="blob-num js-line-number" data-line-number="2102"></td>
-        <td id="LC2102" class="blob-code js-file-line">  <span class="pl-k">return</span> y;</td>
-      </tr>
-      <tr>
-        <td id="L2103" class="blob-num js-line-number" data-line-number="2103"></td>
-        <td id="LC2103" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2104" class="blob-num js-line-number" data-line-number="2104"></td>
-        <td id="LC2104" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2105" class="blob-num js-line-number" data-line-number="2105"></td>
-        <td id="LC2105" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s">const</span> <span class="pl-st">char</span> mpc_escape_input_c[]  = {</td>
-      </tr>
-      <tr>
-        <td id="L2106" class="blob-num js-line-number" data-line-number="2106"></td>
-        <td id="LC2106" class="blob-code js-file-line">  <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-cce">\a</span><span class="pl-pds">&#39;</span></span>, <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-cce">\b</span><span class="pl-pds">&#39;</span></span>, <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-cce">\f</span><span class="pl-pds">&#39;</span></span>, <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-cce">\n</span><span class="pl-pds">&#39;</span></span>, <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-cce">\r</span><span class="pl-pds">&#39;</span></span>,</td>
-      </tr>
-      <tr>
-        <td id="L2107" class="blob-num js-line-number" data-line-number="2107"></td>
-        <td id="LC2107" class="blob-code js-file-line">  <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-cce">\t</span><span class="pl-pds">&#39;</span></span>, <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-cce">\v</span><span class="pl-pds">&#39;</span></span>, <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-cce">\\</span><span class="pl-pds">&#39;</span></span>, <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-cce">\&#39;</span><span class="pl-pds">&#39;</span></span>, <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-cce">\&quot;</span><span class="pl-pds">&#39;</span></span>, <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-ii">\0</span><span class="pl-pds">&#39;</span></span>};</td>
-      </tr>
-      <tr>
-        <td id="L2108" class="blob-num js-line-number" data-line-number="2108"></td>
-        <td id="LC2108" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L2109" class="blob-num js-line-number" data-line-number="2109"></td>
-        <td id="LC2109" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s">const</span> <span class="pl-st">char</span> *mpc_escape_output_c[] = {</td>
-      </tr>
-      <tr>
-        <td id="L2110" class="blob-num js-line-number" data-line-number="2110"></td>
-        <td id="LC2110" class="blob-code js-file-line">  <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-cce">\\</span>a<span class="pl-pds">&quot;</span></span>, <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-cce">\\</span>b<span class="pl-pds">&quot;</span></span>, <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-cce">\\</span>f<span class="pl-pds">&quot;</span></span>, <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-cce">\\</span>n<span class="pl-pds">&quot;</span></span>, <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-cce">\\</span>r<span class="pl-pds">&quot;</span></span>, <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-cce">\\</span>t<span class="pl-pds">&quot;</span></span>, </td>
-      </tr>
-      <tr>
-        <td id="L2111" class="blob-num js-line-number" data-line-number="2111"></td>
-        <td id="LC2111" class="blob-code js-file-line">  <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-cce">\\</span>v<span class="pl-pds">&quot;</span></span>, <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-cce">\\\\</span><span class="pl-pds">&quot;</span></span>, <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-cce">\\</span>&#39;<span class="pl-pds">&quot;</span></span>, <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-cce">\\\&quot;</span><span class="pl-pds">&quot;</span></span>, <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-cce">\\</span>0<span class="pl-pds">&quot;</span></span>, <span class="pl-c1">NULL</span>};</td>
-      </tr>
-      <tr>
-        <td id="L2112" class="blob-num js-line-number" data-line-number="2112"></td>
-        <td id="LC2112" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2113" class="blob-num js-line-number" data-line-number="2113"></td>
-        <td id="LC2113" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s">const</span> <span class="pl-st">char</span> mpc_escape_input_raw_re[] = { <span class="pl-s1"><span class="pl-pds">&#39;</span>/<span class="pl-pds">&#39;</span></span> };</td>
-      </tr>
-      <tr>
-        <td id="L2114" class="blob-num js-line-number" data-line-number="2114"></td>
-        <td id="LC2114" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s">const</span> <span class="pl-st">char</span> *mpc_escape_output_raw_re[] = { <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-cce">\\</span>/<span class="pl-pds">&quot;</span></span>, <span class="pl-c1">NULL</span> };</td>
-      </tr>
-      <tr>
-        <td id="L2115" class="blob-num js-line-number" data-line-number="2115"></td>
-        <td id="LC2115" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2116" class="blob-num js-line-number" data-line-number="2116"></td>
-        <td id="LC2116" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s">const</span> <span class="pl-st">char</span> mpc_escape_input_raw_cstr[] = { <span class="pl-s1"><span class="pl-pds">&#39;</span>&quot;<span class="pl-pds">&#39;</span></span> };</td>
-      </tr>
-      <tr>
-        <td id="L2117" class="blob-num js-line-number" data-line-number="2117"></td>
-        <td id="LC2117" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s">const</span> <span class="pl-st">char</span> *mpc_escape_output_raw_cstr[] = { <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-cce">\\\&quot;</span><span class="pl-pds">&quot;</span></span>, <span class="pl-c1">NULL</span> };</td>
-      </tr>
-      <tr>
-        <td id="L2118" class="blob-num js-line-number" data-line-number="2118"></td>
-        <td id="LC2118" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2119" class="blob-num js-line-number" data-line-number="2119"></td>
-        <td id="LC2119" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s">const</span> <span class="pl-st">char</span> mpc_escape_input_raw_cchar[] = { <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-cce">\&#39;</span><span class="pl-pds">&#39;</span></span> };</td>
-      </tr>
-      <tr>
-        <td id="L2120" class="blob-num js-line-number" data-line-number="2120"></td>
-        <td id="LC2120" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s">const</span> <span class="pl-st">char</span> *mpc_escape_output_raw_cchar[] = { <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-cce">\\</span>&#39;<span class="pl-pds">&quot;</span></span>, <span class="pl-c1">NULL</span> };</td>
-      </tr>
-      <tr>
-        <td id="L2121" class="blob-num js-line-number" data-line-number="2121"></td>
-        <td id="LC2121" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2122" class="blob-num js-line-number" data-line-number="2122"></td>
-        <td id="LC2122" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_escape_new</span>(<span class="pl-s3">mpc_val_t</span> *x, <span class="pl-s">const</span> <span class="pl-st">char</span> *input, <span class="pl-s">const</span> <span class="pl-st">char</span> **output) {</td>
-      </tr>
-      <tr>
-        <td id="L2123" class="blob-num js-line-number" data-line-number="2123"></td>
-        <td id="LC2123" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2124" class="blob-num js-line-number" data-line-number="2124"></td>
-        <td id="LC2124" class="blob-code js-file-line">  <span class="pl-st">int</span> i;</td>
-      </tr>
-      <tr>
-        <td id="L2125" class="blob-num js-line-number" data-line-number="2125"></td>
-        <td id="LC2125" class="blob-code js-file-line">  <span class="pl-st">int</span> found;</td>
-      </tr>
-      <tr>
-        <td id="L2126" class="blob-num js-line-number" data-line-number="2126"></td>
-        <td id="LC2126" class="blob-code js-file-line">  <span class="pl-st">char</span> *s = x;</td>
-      </tr>
-      <tr>
-        <td id="L2127" class="blob-num js-line-number" data-line-number="2127"></td>
-        <td id="LC2127" class="blob-code js-file-line">  <span class="pl-st">char</span> *y = <span class="pl-s3">calloc</span>(<span class="pl-c1">1</span>, <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2128" class="blob-num js-line-number" data-line-number="2128"></td>
-        <td id="LC2128" class="blob-code js-file-line">  <span class="pl-st">char</span> buff[<span class="pl-c1">2</span>];</td>
-      </tr>
-      <tr>
-        <td id="L2129" class="blob-num js-line-number" data-line-number="2129"></td>
-        <td id="LC2129" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2130" class="blob-num js-line-number" data-line-number="2130"></td>
-        <td id="LC2130" class="blob-code js-file-line">  <span class="pl-k">while</span> (*s) {</td>
-      </tr>
-      <tr>
-        <td id="L2131" class="blob-num js-line-number" data-line-number="2131"></td>
-        <td id="LC2131" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L2132" class="blob-num js-line-number" data-line-number="2132"></td>
-        <td id="LC2132" class="blob-code js-file-line">    i = <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L2133" class="blob-num js-line-number" data-line-number="2133"></td>
-        <td id="LC2133" class="blob-code js-file-line">    found = <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L2134" class="blob-num js-line-number" data-line-number="2134"></td>
-        <td id="LC2134" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2135" class="blob-num js-line-number" data-line-number="2135"></td>
-        <td id="LC2135" class="blob-code js-file-line">    <span class="pl-k">while</span> (output[i]) {</td>
-      </tr>
-      <tr>
-        <td id="L2136" class="blob-num js-line-number" data-line-number="2136"></td>
-        <td id="LC2136" class="blob-code js-file-line">      <span class="pl-k">if</span> (*s == input[i]) {</td>
-      </tr>
-      <tr>
-        <td id="L2137" class="blob-num js-line-number" data-line-number="2137"></td>
-        <td id="LC2137" class="blob-code js-file-line">        y = <span class="pl-s3">realloc</span>(y, <span class="pl-s3">strlen</span>(y) + <span class="pl-s3">strlen</span>(output[i]) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2138" class="blob-num js-line-number" data-line-number="2138"></td>
-        <td id="LC2138" class="blob-code js-file-line">        <span class="pl-s3">strcat</span>(y, output[i]);</td>
-      </tr>
-      <tr>
-        <td id="L2139" class="blob-num js-line-number" data-line-number="2139"></td>
-        <td id="LC2139" class="blob-code js-file-line">        found = <span class="pl-c1">1</span>;</td>
-      </tr>
-      <tr>
-        <td id="L2140" class="blob-num js-line-number" data-line-number="2140"></td>
-        <td id="LC2140" class="blob-code js-file-line">        <span class="pl-k">break</span>;</td>
-      </tr>
-      <tr>
-        <td id="L2141" class="blob-num js-line-number" data-line-number="2141"></td>
-        <td id="LC2141" class="blob-code js-file-line">      }</td>
-      </tr>
-      <tr>
-        <td id="L2142" class="blob-num js-line-number" data-line-number="2142"></td>
-        <td id="LC2142" class="blob-code js-file-line">      i++;</td>
-      </tr>
-      <tr>
-        <td id="L2143" class="blob-num js-line-number" data-line-number="2143"></td>
-        <td id="LC2143" class="blob-code js-file-line">    }</td>
-      </tr>
-      <tr>
-        <td id="L2144" class="blob-num js-line-number" data-line-number="2144"></td>
-        <td id="LC2144" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L2145" class="blob-num js-line-number" data-line-number="2145"></td>
-        <td id="LC2145" class="blob-code js-file-line">    <span class="pl-k">if</span> (!found) {</td>
-      </tr>
-      <tr>
-        <td id="L2146" class="blob-num js-line-number" data-line-number="2146"></td>
-        <td id="LC2146" class="blob-code js-file-line">      y = <span class="pl-s3">realloc</span>(y, <span class="pl-s3">strlen</span>(y) + <span class="pl-c1">2</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2147" class="blob-num js-line-number" data-line-number="2147"></td>
-        <td id="LC2147" class="blob-code js-file-line">      buff[<span class="pl-c1">0</span>] = *s; buff[<span class="pl-c1">1</span>] = <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-ii">\0</span><span class="pl-pds">&#39;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L2148" class="blob-num js-line-number" data-line-number="2148"></td>
-        <td id="LC2148" class="blob-code js-file-line">      <span class="pl-s3">strcat</span>(y, buff);</td>
-      </tr>
-      <tr>
-        <td id="L2149" class="blob-num js-line-number" data-line-number="2149"></td>
-        <td id="LC2149" class="blob-code js-file-line">    }</td>
-      </tr>
-      <tr>
-        <td id="L2150" class="blob-num js-line-number" data-line-number="2150"></td>
-        <td id="LC2150" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L2151" class="blob-num js-line-number" data-line-number="2151"></td>
-        <td id="LC2151" class="blob-code js-file-line">    s++;</td>
-      </tr>
-      <tr>
-        <td id="L2152" class="blob-num js-line-number" data-line-number="2152"></td>
-        <td id="LC2152" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L2153" class="blob-num js-line-number" data-line-number="2153"></td>
-        <td id="LC2153" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2154" class="blob-num js-line-number" data-line-number="2154"></td>
-        <td id="LC2154" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2155" class="blob-num js-line-number" data-line-number="2155"></td>
-        <td id="LC2155" class="blob-code js-file-line">  <span class="pl-k">return</span> y;</td>
-      </tr>
-      <tr>
-        <td id="L2156" class="blob-num js-line-number" data-line-number="2156"></td>
-        <td id="LC2156" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2157" class="blob-num js-line-number" data-line-number="2157"></td>
-        <td id="LC2157" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2158" class="blob-num js-line-number" data-line-number="2158"></td>
-        <td id="LC2158" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_unescape_new</span>(<span class="pl-s3">mpc_val_t</span> *x, <span class="pl-s">const</span> <span class="pl-st">char</span> *input, <span class="pl-s">const</span> <span class="pl-st">char</span> **output) {</td>
-      </tr>
-      <tr>
-        <td id="L2159" class="blob-num js-line-number" data-line-number="2159"></td>
-        <td id="LC2159" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2160" class="blob-num js-line-number" data-line-number="2160"></td>
-        <td id="LC2160" class="blob-code js-file-line">  <span class="pl-st">int</span> i;</td>
-      </tr>
-      <tr>
-        <td id="L2161" class="blob-num js-line-number" data-line-number="2161"></td>
-        <td id="LC2161" class="blob-code js-file-line">  <span class="pl-st">int</span> found = <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L2162" class="blob-num js-line-number" data-line-number="2162"></td>
-        <td id="LC2162" class="blob-code js-file-line">  <span class="pl-st">char</span> *s = x;</td>
-      </tr>
-      <tr>
-        <td id="L2163" class="blob-num js-line-number" data-line-number="2163"></td>
-        <td id="LC2163" class="blob-code js-file-line">  <span class="pl-st">char</span> *y = <span class="pl-s3">calloc</span>(<span class="pl-c1">1</span>, <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2164" class="blob-num js-line-number" data-line-number="2164"></td>
-        <td id="LC2164" class="blob-code js-file-line">  <span class="pl-st">char</span> buff[<span class="pl-c1">2</span>];</td>
-      </tr>
-      <tr>
-        <td id="L2165" class="blob-num js-line-number" data-line-number="2165"></td>
-        <td id="LC2165" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2166" class="blob-num js-line-number" data-line-number="2166"></td>
-        <td id="LC2166" class="blob-code js-file-line">  <span class="pl-k">while</span> (*s) {</td>
-      </tr>
-      <tr>
-        <td id="L2167" class="blob-num js-line-number" data-line-number="2167"></td>
-        <td id="LC2167" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L2168" class="blob-num js-line-number" data-line-number="2168"></td>
-        <td id="LC2168" class="blob-code js-file-line">    i = <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L2169" class="blob-num js-line-number" data-line-number="2169"></td>
-        <td id="LC2169" class="blob-code js-file-line">    found = <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L2170" class="blob-num js-line-number" data-line-number="2170"></td>
-        <td id="LC2170" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L2171" class="blob-num js-line-number" data-line-number="2171"></td>
-        <td id="LC2171" class="blob-code js-file-line">    <span class="pl-k">while</span> (output[i]) {</td>
-      </tr>
-      <tr>
-        <td id="L2172" class="blob-num js-line-number" data-line-number="2172"></td>
-        <td id="LC2172" class="blob-code js-file-line">      <span class="pl-k">if</span> ((*(s+<span class="pl-c1">0</span>)) == output[i][<span class="pl-c1">0</span>] &amp;&amp;</td>
-      </tr>
-      <tr>
-        <td id="L2173" class="blob-num js-line-number" data-line-number="2173"></td>
-        <td id="LC2173" class="blob-code js-file-line">          (*(s+<span class="pl-c1">1</span>)) == output[i][<span class="pl-c1">1</span>]) {</td>
-      </tr>
-      <tr>
-        <td id="L2174" class="blob-num js-line-number" data-line-number="2174"></td>
-        <td id="LC2174" class="blob-code js-file-line">        y = <span class="pl-s3">realloc</span>(y, <span class="pl-s3">strlen</span>(y) + <span class="pl-c1">2</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2175" class="blob-num js-line-number" data-line-number="2175"></td>
-        <td id="LC2175" class="blob-code js-file-line">        buff[<span class="pl-c1">0</span>] = input[i]; buff[<span class="pl-c1">1</span>] = <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-ii">\0</span><span class="pl-pds">&#39;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L2176" class="blob-num js-line-number" data-line-number="2176"></td>
-        <td id="LC2176" class="blob-code js-file-line">        <span class="pl-s3">strcat</span>(y, buff);</td>
-      </tr>
-      <tr>
-        <td id="L2177" class="blob-num js-line-number" data-line-number="2177"></td>
-        <td id="LC2177" class="blob-code js-file-line">        found = <span class="pl-c1">1</span>;</td>
-      </tr>
-      <tr>
-        <td id="L2178" class="blob-num js-line-number" data-line-number="2178"></td>
-        <td id="LC2178" class="blob-code js-file-line">        s++;</td>
-      </tr>
-      <tr>
-        <td id="L2179" class="blob-num js-line-number" data-line-number="2179"></td>
-        <td id="LC2179" class="blob-code js-file-line">        <span class="pl-k">break</span>;</td>
-      </tr>
-      <tr>
-        <td id="L2180" class="blob-num js-line-number" data-line-number="2180"></td>
-        <td id="LC2180" class="blob-code js-file-line">      }</td>
-      </tr>
-      <tr>
-        <td id="L2181" class="blob-num js-line-number" data-line-number="2181"></td>
-        <td id="LC2181" class="blob-code js-file-line">      i++;</td>
-      </tr>
-      <tr>
-        <td id="L2182" class="blob-num js-line-number" data-line-number="2182"></td>
-        <td id="LC2182" class="blob-code js-file-line">    }</td>
-      </tr>
-      <tr>
-        <td id="L2183" class="blob-num js-line-number" data-line-number="2183"></td>
-        <td id="LC2183" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L2184" class="blob-num js-line-number" data-line-number="2184"></td>
-        <td id="LC2184" class="blob-code js-file-line">    <span class="pl-k">if</span> (!found) {</td>
-      </tr>
-      <tr>
-        <td id="L2185" class="blob-num js-line-number" data-line-number="2185"></td>
-        <td id="LC2185" class="blob-code js-file-line">      y = <span class="pl-s3">realloc</span>(y, <span class="pl-s3">strlen</span>(y) + <span class="pl-c1">2</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2186" class="blob-num js-line-number" data-line-number="2186"></td>
-        <td id="LC2186" class="blob-code js-file-line">      buff[<span class="pl-c1">0</span>] = *s; buff[<span class="pl-c1">1</span>] = <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-ii">\0</span><span class="pl-pds">&#39;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L2187" class="blob-num js-line-number" data-line-number="2187"></td>
-        <td id="LC2187" class="blob-code js-file-line">      <span class="pl-s3">strcat</span>(y, buff);</td>
-      </tr>
-      <tr>
-        <td id="L2188" class="blob-num js-line-number" data-line-number="2188"></td>
-        <td id="LC2188" class="blob-code js-file-line">    }</td>
-      </tr>
-      <tr>
-        <td id="L2189" class="blob-num js-line-number" data-line-number="2189"></td>
-        <td id="LC2189" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L2190" class="blob-num js-line-number" data-line-number="2190"></td>
-        <td id="LC2190" class="blob-code js-file-line">    <span class="pl-k">if</span> (*s == <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-ii">\0</span><span class="pl-pds">&#39;</span></span>) { <span class="pl-k">break</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L2191" class="blob-num js-line-number" data-line-number="2191"></td>
-        <td id="LC2191" class="blob-code js-file-line">    <span class="pl-k">else</span> { s++; }</td>
-      </tr>
-      <tr>
-        <td id="L2192" class="blob-num js-line-number" data-line-number="2192"></td>
-        <td id="LC2192" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L2193" class="blob-num js-line-number" data-line-number="2193"></td>
-        <td id="LC2193" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2194" class="blob-num js-line-number" data-line-number="2194"></td>
-        <td id="LC2194" class="blob-code js-file-line">  <span class="pl-k">return</span> y;</td>
-      </tr>
-      <tr>
-        <td id="L2195" class="blob-num js-line-number" data-line-number="2195"></td>
-        <td id="LC2195" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2196" class="blob-num js-line-number" data-line-number="2196"></td>
-        <td id="LC2196" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2197" class="blob-num js-line-number" data-line-number="2197"></td>
-        <td id="LC2197" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2198" class="blob-num js-line-number" data-line-number="2198"></td>
-        <td id="LC2198" class="blob-code js-file-line"><span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_escape</span>(<span class="pl-s3">mpc_val_t</span> *x) {</td>
-      </tr>
-      <tr>
-        <td id="L2199" class="blob-num js-line-number" data-line-number="2199"></td>
-        <td id="LC2199" class="blob-code js-file-line">  <span class="pl-s3">mpc_val_t</span> *y = <span class="pl-s3">mpcf_escape_new</span>(x, mpc_escape_input_c, mpc_escape_output_c);</td>
-      </tr>
-      <tr>
-        <td id="L2200" class="blob-num js-line-number" data-line-number="2200"></td>
-        <td id="LC2200" class="blob-code js-file-line">  <span class="pl-s3">free</span>(x);</td>
-      </tr>
-      <tr>
-        <td id="L2201" class="blob-num js-line-number" data-line-number="2201"></td>
-        <td id="LC2201" class="blob-code js-file-line">  <span class="pl-k">return</span> y;</td>
-      </tr>
-      <tr>
-        <td id="L2202" class="blob-num js-line-number" data-line-number="2202"></td>
-        <td id="LC2202" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2203" class="blob-num js-line-number" data-line-number="2203"></td>
-        <td id="LC2203" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2204" class="blob-num js-line-number" data-line-number="2204"></td>
-        <td id="LC2204" class="blob-code js-file-line"><span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_unescape</span>(<span class="pl-s3">mpc_val_t</span> *x) {</td>
-      </tr>
-      <tr>
-        <td id="L2205" class="blob-num js-line-number" data-line-number="2205"></td>
-        <td id="LC2205" class="blob-code js-file-line">  <span class="pl-s3">mpc_val_t</span> *y = <span class="pl-s3">mpcf_unescape_new</span>(x, mpc_escape_input_c, mpc_escape_output_c);</td>
-      </tr>
-      <tr>
-        <td id="L2206" class="blob-num js-line-number" data-line-number="2206"></td>
-        <td id="LC2206" class="blob-code js-file-line">  <span class="pl-s3">free</span>(x);</td>
-      </tr>
-      <tr>
-        <td id="L2207" class="blob-num js-line-number" data-line-number="2207"></td>
-        <td id="LC2207" class="blob-code js-file-line">  <span class="pl-k">return</span> y;</td>
-      </tr>
-      <tr>
-        <td id="L2208" class="blob-num js-line-number" data-line-number="2208"></td>
-        <td id="LC2208" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2209" class="blob-num js-line-number" data-line-number="2209"></td>
-        <td id="LC2209" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2210" class="blob-num js-line-number" data-line-number="2210"></td>
-        <td id="LC2210" class="blob-code js-file-line"><span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_unescape_regex</span>(<span class="pl-s3">mpc_val_t</span> *x) {</td>
-      </tr>
-      <tr>
-        <td id="L2211" class="blob-num js-line-number" data-line-number="2211"></td>
-        <td id="LC2211" class="blob-code js-file-line">  <span class="pl-s3">mpc_val_t</span> *y = <span class="pl-s3">mpcf_unescape_new</span>(x, mpc_escape_input_raw_re, mpc_escape_output_raw_re);</td>
-      </tr>
-      <tr>
-        <td id="L2212" class="blob-num js-line-number" data-line-number="2212"></td>
-        <td id="LC2212" class="blob-code js-file-line">  <span class="pl-s3">free</span>(x);</td>
-      </tr>
-      <tr>
-        <td id="L2213" class="blob-num js-line-number" data-line-number="2213"></td>
-        <td id="LC2213" class="blob-code js-file-line">  <span class="pl-k">return</span> y;  </td>
-      </tr>
-      <tr>
-        <td id="L2214" class="blob-num js-line-number" data-line-number="2214"></td>
-        <td id="LC2214" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2215" class="blob-num js-line-number" data-line-number="2215"></td>
-        <td id="LC2215" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2216" class="blob-num js-line-number" data-line-number="2216"></td>
-        <td id="LC2216" class="blob-code js-file-line"><span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_escape_string_raw</span>(<span class="pl-s3">mpc_val_t</span> *x) {</td>
-      </tr>
-      <tr>
-        <td id="L2217" class="blob-num js-line-number" data-line-number="2217"></td>
-        <td id="LC2217" class="blob-code js-file-line">  <span class="pl-s3">mpc_val_t</span> *y = <span class="pl-s3">mpcf_escape_new</span>(x, mpc_escape_input_raw_cstr, mpc_escape_output_raw_cstr);</td>
-      </tr>
-      <tr>
-        <td id="L2218" class="blob-num js-line-number" data-line-number="2218"></td>
-        <td id="LC2218" class="blob-code js-file-line">  <span class="pl-s3">free</span>(x);</td>
-      </tr>
-      <tr>
-        <td id="L2219" class="blob-num js-line-number" data-line-number="2219"></td>
-        <td id="LC2219" class="blob-code js-file-line">  <span class="pl-k">return</span> y;</td>
-      </tr>
-      <tr>
-        <td id="L2220" class="blob-num js-line-number" data-line-number="2220"></td>
-        <td id="LC2220" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2221" class="blob-num js-line-number" data-line-number="2221"></td>
-        <td id="LC2221" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2222" class="blob-num js-line-number" data-line-number="2222"></td>
-        <td id="LC2222" class="blob-code js-file-line"><span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_unescape_string_raw</span>(<span class="pl-s3">mpc_val_t</span> *x) {</td>
-      </tr>
-      <tr>
-        <td id="L2223" class="blob-num js-line-number" data-line-number="2223"></td>
-        <td id="LC2223" class="blob-code js-file-line">  <span class="pl-s3">mpc_val_t</span> *y = <span class="pl-s3">mpcf_unescape_new</span>(x, mpc_escape_input_raw_cstr, mpc_escape_output_raw_cstr);</td>
-      </tr>
-      <tr>
-        <td id="L2224" class="blob-num js-line-number" data-line-number="2224"></td>
-        <td id="LC2224" class="blob-code js-file-line">  <span class="pl-s3">free</span>(x);</td>
-      </tr>
-      <tr>
-        <td id="L2225" class="blob-num js-line-number" data-line-number="2225"></td>
-        <td id="LC2225" class="blob-code js-file-line">  <span class="pl-k">return</span> y;</td>
-      </tr>
-      <tr>
-        <td id="L2226" class="blob-num js-line-number" data-line-number="2226"></td>
-        <td id="LC2226" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2227" class="blob-num js-line-number" data-line-number="2227"></td>
-        <td id="LC2227" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2228" class="blob-num js-line-number" data-line-number="2228"></td>
-        <td id="LC2228" class="blob-code js-file-line"><span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_escape_char_raw</span>(<span class="pl-s3">mpc_val_t</span> *x) {</td>
-      </tr>
-      <tr>
-        <td id="L2229" class="blob-num js-line-number" data-line-number="2229"></td>
-        <td id="LC2229" class="blob-code js-file-line">  <span class="pl-s3">mpc_val_t</span> *y = <span class="pl-s3">mpcf_escape_new</span>(x, mpc_escape_input_raw_cchar, mpc_escape_output_raw_cchar);</td>
-      </tr>
-      <tr>
-        <td id="L2230" class="blob-num js-line-number" data-line-number="2230"></td>
-        <td id="LC2230" class="blob-code js-file-line">  <span class="pl-s3">free</span>(x);</td>
-      </tr>
-      <tr>
-        <td id="L2231" class="blob-num js-line-number" data-line-number="2231"></td>
-        <td id="LC2231" class="blob-code js-file-line">  <span class="pl-k">return</span> y;</td>
-      </tr>
-      <tr>
-        <td id="L2232" class="blob-num js-line-number" data-line-number="2232"></td>
-        <td id="LC2232" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2233" class="blob-num js-line-number" data-line-number="2233"></td>
-        <td id="LC2233" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2234" class="blob-num js-line-number" data-line-number="2234"></td>
-        <td id="LC2234" class="blob-code js-file-line"><span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_unescape_char_raw</span>(<span class="pl-s3">mpc_val_t</span> *x) {</td>
-      </tr>
-      <tr>
-        <td id="L2235" class="blob-num js-line-number" data-line-number="2235"></td>
-        <td id="LC2235" class="blob-code js-file-line">  <span class="pl-s3">mpc_val_t</span> *y = <span class="pl-s3">mpcf_unescape_new</span>(x, mpc_escape_input_raw_cchar, mpc_escape_output_raw_cchar);</td>
-      </tr>
-      <tr>
-        <td id="L2236" class="blob-num js-line-number" data-line-number="2236"></td>
-        <td id="LC2236" class="blob-code js-file-line">  <span class="pl-s3">free</span>(x);</td>
-      </tr>
-      <tr>
-        <td id="L2237" class="blob-num js-line-number" data-line-number="2237"></td>
-        <td id="LC2237" class="blob-code js-file-line">  <span class="pl-k">return</span> y;</td>
-      </tr>
-      <tr>
-        <td id="L2238" class="blob-num js-line-number" data-line-number="2238"></td>
-        <td id="LC2238" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2239" class="blob-num js-line-number" data-line-number="2239"></td>
-        <td id="LC2239" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2240" class="blob-num js-line-number" data-line-number="2240"></td>
-        <td id="LC2240" class="blob-code js-file-line"><span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_null</span>(<span class="pl-st">int</span> n, <span class="pl-s3">mpc_val_t</span>** xs) { (<span class="pl-st">void</span>) n; (<span class="pl-st">void</span>) xs; <span class="pl-k">return</span> <span class="pl-c1">NULL</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L2241" class="blob-num js-line-number" data-line-number="2241"></td>
-        <td id="LC2241" class="blob-code js-file-line"><span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_fst</span>(<span class="pl-st">int</span> n, <span class="pl-s3">mpc_val_t</span> **xs) { (<span class="pl-st">void</span>) n; <span class="pl-k">return</span> xs[<span class="pl-c1">0</span>]; }</td>
-      </tr>
-      <tr>
-        <td id="L2242" class="blob-num js-line-number" data-line-number="2242"></td>
-        <td id="LC2242" class="blob-code js-file-line"><span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_snd</span>(<span class="pl-st">int</span> n, <span class="pl-s3">mpc_val_t</span> **xs) { (<span class="pl-st">void</span>) n; <span class="pl-k">return</span> xs[<span class="pl-c1">1</span>]; }</td>
-      </tr>
-      <tr>
-        <td id="L2243" class="blob-num js-line-number" data-line-number="2243"></td>
-        <td id="LC2243" class="blob-code js-file-line"><span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_trd</span>(<span class="pl-st">int</span> n, <span class="pl-s3">mpc_val_t</span> **xs) { (<span class="pl-st">void</span>) n; <span class="pl-k">return</span> xs[<span class="pl-c1">2</span>]; }</td>
-      </tr>
-      <tr>
-        <td id="L2244" class="blob-num js-line-number" data-line-number="2244"></td>
-        <td id="LC2244" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2245" class="blob-num js-line-number" data-line-number="2245"></td>
-        <td id="LC2245" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_nth_free</span>(<span class="pl-st">int</span> n, <span class="pl-s3">mpc_val_t</span> **xs, <span class="pl-st">int</span> x) {</td>
-      </tr>
-      <tr>
-        <td id="L2246" class="blob-num js-line-number" data-line-number="2246"></td>
-        <td id="LC2246" class="blob-code js-file-line">  <span class="pl-st">int</span> i;</td>
-      </tr>
-      <tr>
-        <td id="L2247" class="blob-num js-line-number" data-line-number="2247"></td>
-        <td id="LC2247" class="blob-code js-file-line">  <span class="pl-k">for</span> (i = <span class="pl-c1">0</span>; i &lt; n; i++) {</td>
-      </tr>
-      <tr>
-        <td id="L2248" class="blob-num js-line-number" data-line-number="2248"></td>
-        <td id="LC2248" class="blob-code js-file-line">    <span class="pl-k">if</span> (i != x) { <span class="pl-s3">free</span>(xs[i]); }</td>
-      </tr>
-      <tr>
-        <td id="L2249" class="blob-num js-line-number" data-line-number="2249"></td>
-        <td id="LC2249" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L2250" class="blob-num js-line-number" data-line-number="2250"></td>
-        <td id="LC2250" class="blob-code js-file-line">  <span class="pl-k">return</span> xs[x];</td>
-      </tr>
-      <tr>
-        <td id="L2251" class="blob-num js-line-number" data-line-number="2251"></td>
-        <td id="LC2251" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2252" class="blob-num js-line-number" data-line-number="2252"></td>
-        <td id="LC2252" class="blob-code js-file-line"> </td>
-      </tr>
-      <tr>
-        <td id="L2253" class="blob-num js-line-number" data-line-number="2253"></td>
-        <td id="LC2253" class="blob-code js-file-line"><span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_fst_free</span>(<span class="pl-st">int</span> n, <span class="pl-s3">mpc_val_t</span> **xs) { <span class="pl-k">return</span> <span class="pl-s3">mpcf_nth_free</span>(n, xs, <span class="pl-c1">0</span>); }</td>
-      </tr>
-      <tr>
-        <td id="L2254" class="blob-num js-line-number" data-line-number="2254"></td>
-        <td id="LC2254" class="blob-code js-file-line"><span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_snd_free</span>(<span class="pl-st">int</span> n, <span class="pl-s3">mpc_val_t</span> **xs) { <span class="pl-k">return</span> <span class="pl-s3">mpcf_nth_free</span>(n, xs, <span class="pl-c1">1</span>); }</td>
-      </tr>
-      <tr>
-        <td id="L2255" class="blob-num js-line-number" data-line-number="2255"></td>
-        <td id="LC2255" class="blob-code js-file-line"><span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_trd_free</span>(<span class="pl-st">int</span> n, <span class="pl-s3">mpc_val_t</span> **xs) { <span class="pl-k">return</span> <span class="pl-s3">mpcf_nth_free</span>(n, xs, <span class="pl-c1">2</span>); }</td>
-      </tr>
-      <tr>
-        <td id="L2256" class="blob-num js-line-number" data-line-number="2256"></td>
-        <td id="LC2256" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2257" class="blob-num js-line-number" data-line-number="2257"></td>
-        <td id="LC2257" class="blob-code js-file-line"><span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_strfold</span>(<span class="pl-st">int</span> n, <span class="pl-s3">mpc_val_t</span> **xs) {</td>
-      </tr>
-      <tr>
-        <td id="L2258" class="blob-num js-line-number" data-line-number="2258"></td>
-        <td id="LC2258" class="blob-code js-file-line">  <span class="pl-st">char</span> *x = <span class="pl-s3">calloc</span>(<span class="pl-c1">1</span>, <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2259" class="blob-num js-line-number" data-line-number="2259"></td>
-        <td id="LC2259" class="blob-code js-file-line">  <span class="pl-st">int</span> i;</td>
-      </tr>
-      <tr>
-        <td id="L2260" class="blob-num js-line-number" data-line-number="2260"></td>
-        <td id="LC2260" class="blob-code js-file-line">  <span class="pl-k">for</span> (i = <span class="pl-c1">0</span>; i &lt; n; i++) {</td>
-      </tr>
-      <tr>
-        <td id="L2261" class="blob-num js-line-number" data-line-number="2261"></td>
-        <td id="LC2261" class="blob-code js-file-line">    x = <span class="pl-s3">realloc</span>(x, <span class="pl-s3">strlen</span>(x) + <span class="pl-s3">strlen</span>(xs[i]) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2262" class="blob-num js-line-number" data-line-number="2262"></td>
-        <td id="LC2262" class="blob-code js-file-line">    <span class="pl-s3">strcat</span>(x, xs[i]);</td>
-      </tr>
-      <tr>
-        <td id="L2263" class="blob-num js-line-number" data-line-number="2263"></td>
-        <td id="LC2263" class="blob-code js-file-line">    <span class="pl-s3">free</span>(xs[i]);</td>
-      </tr>
-      <tr>
-        <td id="L2264" class="blob-num js-line-number" data-line-number="2264"></td>
-        <td id="LC2264" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L2265" class="blob-num js-line-number" data-line-number="2265"></td>
-        <td id="LC2265" class="blob-code js-file-line">  <span class="pl-k">return</span> x;</td>
-      </tr>
-      <tr>
-        <td id="L2266" class="blob-num js-line-number" data-line-number="2266"></td>
-        <td id="LC2266" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2267" class="blob-num js-line-number" data-line-number="2267"></td>
-        <td id="LC2267" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2268" class="blob-num js-line-number" data-line-number="2268"></td>
-        <td id="LC2268" class="blob-code js-file-line"><span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_maths</span>(<span class="pl-st">int</span> n, <span class="pl-s3">mpc_val_t</span> **xs) {</td>
-      </tr>
-      <tr>
-        <td id="L2269" class="blob-num js-line-number" data-line-number="2269"></td>
-        <td id="LC2269" class="blob-code js-file-line">  <span class="pl-st">int</span> **vs = (<span class="pl-st">int</span>**)xs;</td>
-      </tr>
-      <tr>
-        <td id="L2270" class="blob-num js-line-number" data-line-number="2270"></td>
-        <td id="LC2270" class="blob-code js-file-line">  (<span class="pl-st">void</span>) n;</td>
-      </tr>
-      <tr>
-        <td id="L2271" class="blob-num js-line-number" data-line-number="2271"></td>
-        <td id="LC2271" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2272" class="blob-num js-line-number" data-line-number="2272"></td>
-        <td id="LC2272" class="blob-code js-file-line">  <span class="pl-k">if</span> (<span class="pl-s3">strcmp</span>(xs[<span class="pl-c1">1</span>], <span class="pl-s1"><span class="pl-pds">&quot;</span>*<span class="pl-pds">&quot;</span></span>) == <span class="pl-c1">0</span>) { *vs[<span class="pl-c1">0</span>] *= *vs[<span class="pl-c1">2</span>]; }</td>
-      </tr>
-      <tr>
-        <td id="L2273" class="blob-num js-line-number" data-line-number="2273"></td>
-        <td id="LC2273" class="blob-code js-file-line">  <span class="pl-k">if</span> (<span class="pl-s3">strcmp</span>(xs[<span class="pl-c1">1</span>], <span class="pl-s1"><span class="pl-pds">&quot;</span>/<span class="pl-pds">&quot;</span></span>) == <span class="pl-c1">0</span>) { *vs[<span class="pl-c1">0</span>] /= *vs[<span class="pl-c1">2</span>]; }</td>
-      </tr>
-      <tr>
-        <td id="L2274" class="blob-num js-line-number" data-line-number="2274"></td>
-        <td id="LC2274" class="blob-code js-file-line">  <span class="pl-k">if</span> (<span class="pl-s3">strcmp</span>(xs[<span class="pl-c1">1</span>], <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-ii">%</span><span class="pl-pds">&quot;</span></span>) == <span class="pl-c1">0</span>) { *vs[<span class="pl-c1">0</span>] %= *vs[<span class="pl-c1">2</span>]; }</td>
-      </tr>
-      <tr>
-        <td id="L2275" class="blob-num js-line-number" data-line-number="2275"></td>
-        <td id="LC2275" class="blob-code js-file-line">  <span class="pl-k">if</span> (<span class="pl-s3">strcmp</span>(xs[<span class="pl-c1">1</span>], <span class="pl-s1"><span class="pl-pds">&quot;</span>+<span class="pl-pds">&quot;</span></span>) == <span class="pl-c1">0</span>) { *vs[<span class="pl-c1">0</span>] += *vs[<span class="pl-c1">2</span>]; }</td>
-      </tr>
-      <tr>
-        <td id="L2276" class="blob-num js-line-number" data-line-number="2276"></td>
-        <td id="LC2276" class="blob-code js-file-line">  <span class="pl-k">if</span> (<span class="pl-s3">strcmp</span>(xs[<span class="pl-c1">1</span>], <span class="pl-s1"><span class="pl-pds">&quot;</span>-<span class="pl-pds">&quot;</span></span>) == <span class="pl-c1">0</span>) { *vs[<span class="pl-c1">0</span>] -= *vs[<span class="pl-c1">2</span>]; }</td>
-      </tr>
-      <tr>
-        <td id="L2277" class="blob-num js-line-number" data-line-number="2277"></td>
-        <td id="LC2277" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2278" class="blob-num js-line-number" data-line-number="2278"></td>
-        <td id="LC2278" class="blob-code js-file-line">  <span class="pl-s3">free</span>(xs[<span class="pl-c1">1</span>]); <span class="pl-s3">free</span>(xs[<span class="pl-c1">2</span>]);</td>
-      </tr>
-      <tr>
-        <td id="L2279" class="blob-num js-line-number" data-line-number="2279"></td>
-        <td id="LC2279" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2280" class="blob-num js-line-number" data-line-number="2280"></td>
-        <td id="LC2280" class="blob-code js-file-line">  <span class="pl-k">return</span> xs[<span class="pl-c1">0</span>];</td>
-      </tr>
-      <tr>
-        <td id="L2281" class="blob-num js-line-number" data-line-number="2281"></td>
-        <td id="LC2281" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2282" class="blob-num js-line-number" data-line-number="2282"></td>
-        <td id="LC2282" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2283" class="blob-num js-line-number" data-line-number="2283"></td>
-        <td id="LC2283" class="blob-code js-file-line"><span class="pl-c">/*</span></td>
-      </tr>
-      <tr>
-        <td id="L2284" class="blob-num js-line-number" data-line-number="2284"></td>
-        <td id="LC2284" class="blob-code js-file-line"><span class="pl-c">** Printing</span></td>
-      </tr>
-      <tr>
-        <td id="L2285" class="blob-num js-line-number" data-line-number="2285"></td>
-        <td id="LC2285" class="blob-code js-file-line"><span class="pl-c">*/</span></td>
-      </tr>
-      <tr>
-        <td id="L2286" class="blob-num js-line-number" data-line-number="2286"></td>
-        <td id="LC2286" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2287" class="blob-num js-line-number" data-line-number="2287"></td>
-        <td id="LC2287" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">void</span> <span class="pl-en">mpc_print_unretained</span>(<span class="pl-s3">mpc_parser_t</span> *p, <span class="pl-st">int</span> force) {</td>
-      </tr>
-      <tr>
-        <td id="L2288" class="blob-num js-line-number" data-line-number="2288"></td>
-        <td id="LC2288" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2289" class="blob-num js-line-number" data-line-number="2289"></td>
-        <td id="LC2289" class="blob-code js-file-line">  <span class="pl-c">/* TODO: Print Everything Escaped */</span></td>
-      </tr>
-      <tr>
-        <td id="L2290" class="blob-num js-line-number" data-line-number="2290"></td>
-        <td id="LC2290" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2291" class="blob-num js-line-number" data-line-number="2291"></td>
-        <td id="LC2291" class="blob-code js-file-line">  <span class="pl-st">int</span> i;</td>
-      </tr>
-      <tr>
-        <td id="L2292" class="blob-num js-line-number" data-line-number="2292"></td>
-        <td id="LC2292" class="blob-code js-file-line">  <span class="pl-st">char</span> *s, *e;</td>
-      </tr>
-      <tr>
-        <td id="L2293" class="blob-num js-line-number" data-line-number="2293"></td>
-        <td id="LC2293" class="blob-code js-file-line">  <span class="pl-st">char</span> buff[<span class="pl-c1">2</span>];</td>
-      </tr>
-      <tr>
-        <td id="L2294" class="blob-num js-line-number" data-line-number="2294"></td>
-        <td id="LC2294" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2295" class="blob-num js-line-number" data-line-number="2295"></td>
-        <td id="LC2295" class="blob-code js-file-line">  <span class="pl-k">if</span> (p-&gt;retained &amp;&amp; !force) {;</td>
-      </tr>
-      <tr>
-        <td id="L2296" class="blob-num js-line-number" data-line-number="2296"></td>
-        <td id="LC2296" class="blob-code js-file-line">    <span class="pl-k">if</span> (p-&gt;name) { <span class="pl-s3">printf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>&lt;<span class="pl-c1">%s</span>&gt;<span class="pl-pds">&quot;</span></span>, p-&gt;name); }</td>
-      </tr>
-      <tr>
-        <td id="L2297" class="blob-num js-line-number" data-line-number="2297"></td>
-        <td id="LC2297" class="blob-code js-file-line">    <span class="pl-k">else</span> { <span class="pl-s3">printf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>&lt;anon&gt;<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L2298" class="blob-num js-line-number" data-line-number="2298"></td>
-        <td id="LC2298" class="blob-code js-file-line">    <span class="pl-k">return</span>;</td>
-      </tr>
-      <tr>
-        <td id="L2299" class="blob-num js-line-number" data-line-number="2299"></td>
-        <td id="LC2299" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L2300" class="blob-num js-line-number" data-line-number="2300"></td>
-        <td id="LC2300" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2301" class="blob-num js-line-number" data-line-number="2301"></td>
-        <td id="LC2301" class="blob-code js-file-line">  <span class="pl-k">if</span> (p-&gt;type == MPC_TYPE_UNDEFINED) { <span class="pl-s3">printf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>&lt;?&gt;<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L2302" class="blob-num js-line-number" data-line-number="2302"></td>
-        <td id="LC2302" class="blob-code js-file-line">  <span class="pl-k">if</span> (p-&gt;type == MPC_TYPE_PASS)   { <span class="pl-s3">printf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>&lt;:&gt;<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L2303" class="blob-num js-line-number" data-line-number="2303"></td>
-        <td id="LC2303" class="blob-code js-file-line">  <span class="pl-k">if</span> (p-&gt;type == MPC_TYPE_FAIL)   { <span class="pl-s3">printf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>&lt;!&gt;<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L2304" class="blob-num js-line-number" data-line-number="2304"></td>
-        <td id="LC2304" class="blob-code js-file-line">  <span class="pl-k">if</span> (p-&gt;type == MPC_TYPE_LIFT)   { <span class="pl-s3">printf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>&lt;#&gt;<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L2305" class="blob-num js-line-number" data-line-number="2305"></td>
-        <td id="LC2305" class="blob-code js-file-line">  <span class="pl-k">if</span> (p-&gt;type == MPC_TYPE_STATE)  { <span class="pl-s3">printf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>&lt;S&gt;<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L2306" class="blob-num js-line-number" data-line-number="2306"></td>
-        <td id="LC2306" class="blob-code js-file-line">  <span class="pl-k">if</span> (p-&gt;type == MPC_TYPE_ANCHOR) { <span class="pl-s3">printf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>&lt;@&gt;<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L2307" class="blob-num js-line-number" data-line-number="2307"></td>
-        <td id="LC2307" class="blob-code js-file-line">  <span class="pl-k">if</span> (p-&gt;type == MPC_TYPE_EXPECT) {</td>
-      </tr>
-      <tr>
-        <td id="L2308" class="blob-num js-line-number" data-line-number="2308"></td>
-        <td id="LC2308" class="blob-code js-file-line">    <span class="pl-s3">printf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-c1">%s</span><span class="pl-pds">&quot;</span></span>, p-&gt;data.<span class="pl-vo">expect</span>.<span class="pl-vo">m</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2309" class="blob-num js-line-number" data-line-number="2309"></td>
-        <td id="LC2309" class="blob-code js-file-line">    <span class="pl-c">/*mpc_print_unretained(p-&gt;data.expect.x, 0);*/</span></td>
-      </tr>
-      <tr>
-        <td id="L2310" class="blob-num js-line-number" data-line-number="2310"></td>
-        <td id="LC2310" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L2311" class="blob-num js-line-number" data-line-number="2311"></td>
-        <td id="LC2311" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2312" class="blob-num js-line-number" data-line-number="2312"></td>
-        <td id="LC2312" class="blob-code js-file-line">  <span class="pl-k">if</span> (p-&gt;type == MPC_TYPE_ANY) { <span class="pl-s3">printf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>&lt;.&gt;<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L2313" class="blob-num js-line-number" data-line-number="2313"></td>
-        <td id="LC2313" class="blob-code js-file-line">  <span class="pl-k">if</span> (p-&gt;type == MPC_TYPE_SATISFY) { <span class="pl-s3">printf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>&lt;f&gt;<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L2314" class="blob-num js-line-number" data-line-number="2314"></td>
-        <td id="LC2314" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2315" class="blob-num js-line-number" data-line-number="2315"></td>
-        <td id="LC2315" class="blob-code js-file-line">  <span class="pl-k">if</span> (p-&gt;type == MPC_TYPE_SINGLE) {</td>
-      </tr>
-      <tr>
-        <td id="L2316" class="blob-num js-line-number" data-line-number="2316"></td>
-        <td id="LC2316" class="blob-code js-file-line">    buff[<span class="pl-c1">0</span>] = p-&gt;data.<span class="pl-vo">single</span>.<span class="pl-vo">x</span>; buff[<span class="pl-c1">1</span>] = <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-ii">\0</span><span class="pl-pds">&#39;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L2317" class="blob-num js-line-number" data-line-number="2317"></td>
-        <td id="LC2317" class="blob-code js-file-line">    s = <span class="pl-s3">mpcf_escape_new</span>(</td>
-      </tr>
-      <tr>
-        <td id="L2318" class="blob-num js-line-number" data-line-number="2318"></td>
-        <td id="LC2318" class="blob-code js-file-line">      buff,</td>
-      </tr>
-      <tr>
-        <td id="L2319" class="blob-num js-line-number" data-line-number="2319"></td>
-        <td id="LC2319" class="blob-code js-file-line">      mpc_escape_input_c,</td>
-      </tr>
-      <tr>
-        <td id="L2320" class="blob-num js-line-number" data-line-number="2320"></td>
-        <td id="LC2320" class="blob-code js-file-line">      mpc_escape_output_c);</td>
-      </tr>
-      <tr>
-        <td id="L2321" class="blob-num js-line-number" data-line-number="2321"></td>
-        <td id="LC2321" class="blob-code js-file-line">    <span class="pl-s3">printf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>&#39;<span class="pl-c1">%s</span>&#39;<span class="pl-pds">&quot;</span></span>, s);</td>
-      </tr>
-      <tr>
-        <td id="L2322" class="blob-num js-line-number" data-line-number="2322"></td>
-        <td id="LC2322" class="blob-code js-file-line">    <span class="pl-s3">free</span>(s);</td>
-      </tr>
-      <tr>
-        <td id="L2323" class="blob-num js-line-number" data-line-number="2323"></td>
-        <td id="LC2323" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L2324" class="blob-num js-line-number" data-line-number="2324"></td>
-        <td id="LC2324" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2325" class="blob-num js-line-number" data-line-number="2325"></td>
-        <td id="LC2325" class="blob-code js-file-line">  <span class="pl-k">if</span> (p-&gt;type == MPC_TYPE_RANGE) {</td>
-      </tr>
-      <tr>
-        <td id="L2326" class="blob-num js-line-number" data-line-number="2326"></td>
-        <td id="LC2326" class="blob-code js-file-line">    buff[<span class="pl-c1">0</span>] = p-&gt;data.<span class="pl-vo">range</span>.<span class="pl-vo">x</span>; buff[<span class="pl-c1">1</span>] = <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-ii">\0</span><span class="pl-pds">&#39;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L2327" class="blob-num js-line-number" data-line-number="2327"></td>
-        <td id="LC2327" class="blob-code js-file-line">    s = <span class="pl-s3">mpcf_escape_new</span>(</td>
-      </tr>
-      <tr>
-        <td id="L2328" class="blob-num js-line-number" data-line-number="2328"></td>
-        <td id="LC2328" class="blob-code js-file-line">      buff,</td>
-      </tr>
-      <tr>
-        <td id="L2329" class="blob-num js-line-number" data-line-number="2329"></td>
-        <td id="LC2329" class="blob-code js-file-line">      mpc_escape_input_c,</td>
-      </tr>
-      <tr>
-        <td id="L2330" class="blob-num js-line-number" data-line-number="2330"></td>
-        <td id="LC2330" class="blob-code js-file-line">      mpc_escape_output_c);</td>
-      </tr>
-      <tr>
-        <td id="L2331" class="blob-num js-line-number" data-line-number="2331"></td>
-        <td id="LC2331" class="blob-code js-file-line">    buff[<span class="pl-c1">0</span>] = p-&gt;data.<span class="pl-vo">range</span>.<span class="pl-vo">y</span>; buff[<span class="pl-c1">1</span>] = <span class="pl-s1"><span class="pl-pds">&#39;</span><span class="pl-ii">\0</span><span class="pl-pds">&#39;</span></span>;</td>
-      </tr>
-      <tr>
-        <td id="L2332" class="blob-num js-line-number" data-line-number="2332"></td>
-        <td id="LC2332" class="blob-code js-file-line">    e = <span class="pl-s3">mpcf_escape_new</span>(</td>
-      </tr>
-      <tr>
-        <td id="L2333" class="blob-num js-line-number" data-line-number="2333"></td>
-        <td id="LC2333" class="blob-code js-file-line">      buff,</td>
-      </tr>
-      <tr>
-        <td id="L2334" class="blob-num js-line-number" data-line-number="2334"></td>
-        <td id="LC2334" class="blob-code js-file-line">      mpc_escape_input_c,</td>
-      </tr>
-      <tr>
-        <td id="L2335" class="blob-num js-line-number" data-line-number="2335"></td>
-        <td id="LC2335" class="blob-code js-file-line">      mpc_escape_output_c);</td>
-      </tr>
-      <tr>
-        <td id="L2336" class="blob-num js-line-number" data-line-number="2336"></td>
-        <td id="LC2336" class="blob-code js-file-line">    <span class="pl-s3">printf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>[<span class="pl-c1">%s</span>-<span class="pl-c1">%s</span>]<span class="pl-pds">&quot;</span></span>, s, e);</td>
-      </tr>
-      <tr>
-        <td id="L2337" class="blob-num js-line-number" data-line-number="2337"></td>
-        <td id="LC2337" class="blob-code js-file-line">    <span class="pl-s3">free</span>(s);</td>
-      </tr>
-      <tr>
-        <td id="L2338" class="blob-num js-line-number" data-line-number="2338"></td>
-        <td id="LC2338" class="blob-code js-file-line">    <span class="pl-s3">free</span>(e);</td>
-      </tr>
-      <tr>
-        <td id="L2339" class="blob-num js-line-number" data-line-number="2339"></td>
-        <td id="LC2339" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L2340" class="blob-num js-line-number" data-line-number="2340"></td>
-        <td id="LC2340" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2341" class="blob-num js-line-number" data-line-number="2341"></td>
-        <td id="LC2341" class="blob-code js-file-line">  <span class="pl-k">if</span> (p-&gt;type == MPC_TYPE_ONEOF) {</td>
-      </tr>
-      <tr>
-        <td id="L2342" class="blob-num js-line-number" data-line-number="2342"></td>
-        <td id="LC2342" class="blob-code js-file-line">    s = <span class="pl-s3">mpcf_escape_new</span>(</td>
-      </tr>
-      <tr>
-        <td id="L2343" class="blob-num js-line-number" data-line-number="2343"></td>
-        <td id="LC2343" class="blob-code js-file-line">      p-&gt;data.<span class="pl-vo">string</span>.<span class="pl-vo">x</span>,</td>
-      </tr>
-      <tr>
-        <td id="L2344" class="blob-num js-line-number" data-line-number="2344"></td>
-        <td id="LC2344" class="blob-code js-file-line">      mpc_escape_input_c,</td>
-      </tr>
-      <tr>
-        <td id="L2345" class="blob-num js-line-number" data-line-number="2345"></td>
-        <td id="LC2345" class="blob-code js-file-line">      mpc_escape_output_c);</td>
-      </tr>
-      <tr>
-        <td id="L2346" class="blob-num js-line-number" data-line-number="2346"></td>
-        <td id="LC2346" class="blob-code js-file-line">    <span class="pl-s3">printf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>[<span class="pl-c1">%s</span>]<span class="pl-pds">&quot;</span></span>, s);</td>
-      </tr>
-      <tr>
-        <td id="L2347" class="blob-num js-line-number" data-line-number="2347"></td>
-        <td id="LC2347" class="blob-code js-file-line">    <span class="pl-s3">free</span>(s);</td>
-      </tr>
-      <tr>
-        <td id="L2348" class="blob-num js-line-number" data-line-number="2348"></td>
-        <td id="LC2348" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L2349" class="blob-num js-line-number" data-line-number="2349"></td>
-        <td id="LC2349" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2350" class="blob-num js-line-number" data-line-number="2350"></td>
-        <td id="LC2350" class="blob-code js-file-line">  <span class="pl-k">if</span> (p-&gt;type == MPC_TYPE_NONEOF) {</td>
-      </tr>
-      <tr>
-        <td id="L2351" class="blob-num js-line-number" data-line-number="2351"></td>
-        <td id="LC2351" class="blob-code js-file-line">    s = <span class="pl-s3">mpcf_escape_new</span>(</td>
-      </tr>
-      <tr>
-        <td id="L2352" class="blob-num js-line-number" data-line-number="2352"></td>
-        <td id="LC2352" class="blob-code js-file-line">      p-&gt;data.<span class="pl-vo">string</span>.<span class="pl-vo">x</span>,</td>
-      </tr>
-      <tr>
-        <td id="L2353" class="blob-num js-line-number" data-line-number="2353"></td>
-        <td id="LC2353" class="blob-code js-file-line">      mpc_escape_input_c,</td>
-      </tr>
-      <tr>
-        <td id="L2354" class="blob-num js-line-number" data-line-number="2354"></td>
-        <td id="LC2354" class="blob-code js-file-line">      mpc_escape_output_c);</td>
-      </tr>
-      <tr>
-        <td id="L2355" class="blob-num js-line-number" data-line-number="2355"></td>
-        <td id="LC2355" class="blob-code js-file-line">    <span class="pl-s3">printf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>[^<span class="pl-c1">%s</span>]<span class="pl-pds">&quot;</span></span>, s);</td>
-      </tr>
-      <tr>
-        <td id="L2356" class="blob-num js-line-number" data-line-number="2356"></td>
-        <td id="LC2356" class="blob-code js-file-line">    <span class="pl-s3">free</span>(s);</td>
-      </tr>
-      <tr>
-        <td id="L2357" class="blob-num js-line-number" data-line-number="2357"></td>
-        <td id="LC2357" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L2358" class="blob-num js-line-number" data-line-number="2358"></td>
-        <td id="LC2358" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2359" class="blob-num js-line-number" data-line-number="2359"></td>
-        <td id="LC2359" class="blob-code js-file-line">  <span class="pl-k">if</span> (p-&gt;type == MPC_TYPE_STRING) {</td>
-      </tr>
-      <tr>
-        <td id="L2360" class="blob-num js-line-number" data-line-number="2360"></td>
-        <td id="LC2360" class="blob-code js-file-line">    s = <span class="pl-s3">mpcf_escape_new</span>(</td>
-      </tr>
-      <tr>
-        <td id="L2361" class="blob-num js-line-number" data-line-number="2361"></td>
-        <td id="LC2361" class="blob-code js-file-line">      p-&gt;data.<span class="pl-vo">string</span>.<span class="pl-vo">x</span>,</td>
-      </tr>
-      <tr>
-        <td id="L2362" class="blob-num js-line-number" data-line-number="2362"></td>
-        <td id="LC2362" class="blob-code js-file-line">      mpc_escape_input_c,</td>
-      </tr>
-      <tr>
-        <td id="L2363" class="blob-num js-line-number" data-line-number="2363"></td>
-        <td id="LC2363" class="blob-code js-file-line">      mpc_escape_output_c);</td>
-      </tr>
-      <tr>
-        <td id="L2364" class="blob-num js-line-number" data-line-number="2364"></td>
-        <td id="LC2364" class="blob-code js-file-line">    <span class="pl-s3">printf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-cce">\&quot;</span><span class="pl-c1">%s</span><span class="pl-cce">\&quot;</span><span class="pl-pds">&quot;</span></span>, s);</td>
-      </tr>
-      <tr>
-        <td id="L2365" class="blob-num js-line-number" data-line-number="2365"></td>
-        <td id="LC2365" class="blob-code js-file-line">    <span class="pl-s3">free</span>(s);</td>
-      </tr>
-      <tr>
-        <td id="L2366" class="blob-num js-line-number" data-line-number="2366"></td>
-        <td id="LC2366" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L2367" class="blob-num js-line-number" data-line-number="2367"></td>
-        <td id="LC2367" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2368" class="blob-num js-line-number" data-line-number="2368"></td>
-        <td id="LC2368" class="blob-code js-file-line">  <span class="pl-k">if</span> (p-&gt;type == MPC_TYPE_APPLY)    { <span class="pl-s3">mpc_print_unretained</span>(p-&gt;data.<span class="pl-vo">apply</span>.<span class="pl-vo">x</span>, <span class="pl-c1">0</span>); }</td>
-      </tr>
-      <tr>
-        <td id="L2369" class="blob-num js-line-number" data-line-number="2369"></td>
-        <td id="LC2369" class="blob-code js-file-line">  <span class="pl-k">if</span> (p-&gt;type == MPC_TYPE_APPLY_TO) { <span class="pl-s3">mpc_print_unretained</span>(p-&gt;data.<span class="pl-vo">apply_to</span>.<span class="pl-vo">x</span>, <span class="pl-c1">0</span>); }</td>
-      </tr>
-      <tr>
-        <td id="L2370" class="blob-num js-line-number" data-line-number="2370"></td>
-        <td id="LC2370" class="blob-code js-file-line">  <span class="pl-k">if</span> (p-&gt;type == MPC_TYPE_PREDICT)  { <span class="pl-s3">mpc_print_unretained</span>(p-&gt;data.<span class="pl-vo">predict</span>.<span class="pl-vo">x</span>, <span class="pl-c1">0</span>); }</td>
-      </tr>
-      <tr>
-        <td id="L2371" class="blob-num js-line-number" data-line-number="2371"></td>
-        <td id="LC2371" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2372" class="blob-num js-line-number" data-line-number="2372"></td>
-        <td id="LC2372" class="blob-code js-file-line">  <span class="pl-k">if</span> (p-&gt;type == MPC_TYPE_NOT)   { <span class="pl-s3">mpc_print_unretained</span>(p-&gt;data.<span class="pl-vo">not</span>.<span class="pl-vo">x</span>, <span class="pl-c1">0</span>); <span class="pl-s3">printf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>!<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L2373" class="blob-num js-line-number" data-line-number="2373"></td>
-        <td id="LC2373" class="blob-code js-file-line">  <span class="pl-k">if</span> (p-&gt;type == MPC_TYPE_MAYBE) { <span class="pl-s3">mpc_print_unretained</span>(p-&gt;data.<span class="pl-vo">not</span>.<span class="pl-vo">x</span>, <span class="pl-c1">0</span>); <span class="pl-s3">printf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>?<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L2374" class="blob-num js-line-number" data-line-number="2374"></td>
-        <td id="LC2374" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2375" class="blob-num js-line-number" data-line-number="2375"></td>
-        <td id="LC2375" class="blob-code js-file-line">  <span class="pl-k">if</span> (p-&gt;type == MPC_TYPE_MANY)  { <span class="pl-s3">mpc_print_unretained</span>(p-&gt;data.<span class="pl-vo">repeat</span>.<span class="pl-vo">x</span>, <span class="pl-c1">0</span>); <span class="pl-s3">printf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>*<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L2376" class="blob-num js-line-number" data-line-number="2376"></td>
-        <td id="LC2376" class="blob-code js-file-line">  <span class="pl-k">if</span> (p-&gt;type == MPC_TYPE_MANY1) { <span class="pl-s3">mpc_print_unretained</span>(p-&gt;data.<span class="pl-vo">repeat</span>.<span class="pl-vo">x</span>, <span class="pl-c1">0</span>); <span class="pl-s3">printf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>+<span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L2377" class="blob-num js-line-number" data-line-number="2377"></td>
-        <td id="LC2377" class="blob-code js-file-line">  <span class="pl-k">if</span> (p-&gt;type == MPC_TYPE_COUNT) { <span class="pl-s3">mpc_print_unretained</span>(p-&gt;data.<span class="pl-vo">repeat</span>.<span class="pl-vo">x</span>, <span class="pl-c1">0</span>); <span class="pl-s3">printf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>{<span class="pl-c1">%i</span>}<span class="pl-pds">&quot;</span></span>, p-&gt;data.<span class="pl-vo">repeat</span>.<span class="pl-vo">n</span>); }</td>
-      </tr>
-      <tr>
-        <td id="L2378" class="blob-num js-line-number" data-line-number="2378"></td>
-        <td id="LC2378" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2379" class="blob-num js-line-number" data-line-number="2379"></td>
-        <td id="LC2379" class="blob-code js-file-line">  <span class="pl-k">if</span> (p-&gt;type == MPC_TYPE_OR) {</td>
-      </tr>
-      <tr>
-        <td id="L2380" class="blob-num js-line-number" data-line-number="2380"></td>
-        <td id="LC2380" class="blob-code js-file-line">    <span class="pl-s3">printf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>(<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L2381" class="blob-num js-line-number" data-line-number="2381"></td>
-        <td id="LC2381" class="blob-code js-file-line">    <span class="pl-k">for</span>(i = <span class="pl-c1">0</span>; i &lt; p-&gt;data.<span class="pl-vo">or</span>.<span class="pl-vo">n</span>-<span class="pl-c1">1</span>; i++) {</td>
-      </tr>
-      <tr>
-        <td id="L2382" class="blob-num js-line-number" data-line-number="2382"></td>
-        <td id="LC2382" class="blob-code js-file-line">      <span class="pl-s3">mpc_print_unretained</span>(p-&gt;data.<span class="pl-vo">or</span>.<span class="pl-vo">xs</span>[i], <span class="pl-c1">0</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2383" class="blob-num js-line-number" data-line-number="2383"></td>
-        <td id="LC2383" class="blob-code js-file-line">      <span class="pl-s3">printf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span> | <span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L2384" class="blob-num js-line-number" data-line-number="2384"></td>
-        <td id="LC2384" class="blob-code js-file-line">    }</td>
-      </tr>
-      <tr>
-        <td id="L2385" class="blob-num js-line-number" data-line-number="2385"></td>
-        <td id="LC2385" class="blob-code js-file-line">    <span class="pl-s3">mpc_print_unretained</span>(p-&gt;data.<span class="pl-vo">or</span>.<span class="pl-vo">xs</span>[p-&gt;data.<span class="pl-vo">or</span>.<span class="pl-vo">n</span>-<span class="pl-c1">1</span>], <span class="pl-c1">0</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2386" class="blob-num js-line-number" data-line-number="2386"></td>
-        <td id="LC2386" class="blob-code js-file-line">    <span class="pl-s3">printf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>)<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L2387" class="blob-num js-line-number" data-line-number="2387"></td>
-        <td id="LC2387" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L2388" class="blob-num js-line-number" data-line-number="2388"></td>
-        <td id="LC2388" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2389" class="blob-num js-line-number" data-line-number="2389"></td>
-        <td id="LC2389" class="blob-code js-file-line">  <span class="pl-k">if</span> (p-&gt;type == MPC_TYPE_AND) {</td>
-      </tr>
-      <tr>
-        <td id="L2390" class="blob-num js-line-number" data-line-number="2390"></td>
-        <td id="LC2390" class="blob-code js-file-line">    <span class="pl-s3">printf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>(<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L2391" class="blob-num js-line-number" data-line-number="2391"></td>
-        <td id="LC2391" class="blob-code js-file-line">    <span class="pl-k">for</span>(i = <span class="pl-c1">0</span>; i &lt; p-&gt;data.<span class="pl-vo">and</span>.<span class="pl-vo">n</span>-<span class="pl-c1">1</span>; i++) {</td>
-      </tr>
-      <tr>
-        <td id="L2392" class="blob-num js-line-number" data-line-number="2392"></td>
-        <td id="LC2392" class="blob-code js-file-line">      <span class="pl-s3">mpc_print_unretained</span>(p-&gt;data.<span class="pl-vo">and</span>.<span class="pl-vo">xs</span>[i], <span class="pl-c1">0</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2393" class="blob-num js-line-number" data-line-number="2393"></td>
-        <td id="LC2393" class="blob-code js-file-line">      <span class="pl-s3">printf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span> <span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L2394" class="blob-num js-line-number" data-line-number="2394"></td>
-        <td id="LC2394" class="blob-code js-file-line">    }</td>
-      </tr>
-      <tr>
-        <td id="L2395" class="blob-num js-line-number" data-line-number="2395"></td>
-        <td id="LC2395" class="blob-code js-file-line">    <span class="pl-s3">mpc_print_unretained</span>(p-&gt;data.<span class="pl-vo">and</span>.<span class="pl-vo">xs</span>[p-&gt;data.<span class="pl-vo">and</span>.<span class="pl-vo">n</span>-<span class="pl-c1">1</span>], <span class="pl-c1">0</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2396" class="blob-num js-line-number" data-line-number="2396"></td>
-        <td id="LC2396" class="blob-code js-file-line">    <span class="pl-s3">printf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>)<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L2397" class="blob-num js-line-number" data-line-number="2397"></td>
-        <td id="LC2397" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L2398" class="blob-num js-line-number" data-line-number="2398"></td>
-        <td id="LC2398" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2399" class="blob-num js-line-number" data-line-number="2399"></td>
-        <td id="LC2399" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2400" class="blob-num js-line-number" data-line-number="2400"></td>
-        <td id="LC2400" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2401" class="blob-num js-line-number" data-line-number="2401"></td>
-        <td id="LC2401" class="blob-code js-file-line"><span class="pl-st">void</span> <span class="pl-en">mpc_print</span>(<span class="pl-s3">mpc_parser_t</span> *p) {</td>
-      </tr>
-      <tr>
-        <td id="L2402" class="blob-num js-line-number" data-line-number="2402"></td>
-        <td id="LC2402" class="blob-code js-file-line">  <span class="pl-s3">mpc_print_unretained</span>(p, <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2403" class="blob-num js-line-number" data-line-number="2403"></td>
-        <td id="LC2403" class="blob-code js-file-line">  <span class="pl-s3">printf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-cce">\n</span><span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L2404" class="blob-num js-line-number" data-line-number="2404"></td>
-        <td id="LC2404" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2405" class="blob-num js-line-number" data-line-number="2405"></td>
-        <td id="LC2405" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2406" class="blob-num js-line-number" data-line-number="2406"></td>
-        <td id="LC2406" class="blob-code js-file-line"><span class="pl-c">/*</span></td>
-      </tr>
-      <tr>
-        <td id="L2407" class="blob-num js-line-number" data-line-number="2407"></td>
-        <td id="LC2407" class="blob-code js-file-line"><span class="pl-c">** Testing</span></td>
-      </tr>
-      <tr>
-        <td id="L2408" class="blob-num js-line-number" data-line-number="2408"></td>
-        <td id="LC2408" class="blob-code js-file-line"><span class="pl-c">*/</span></td>
-      </tr>
-      <tr>
-        <td id="L2409" class="blob-num js-line-number" data-line-number="2409"></td>
-        <td id="LC2409" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2410" class="blob-num js-line-number" data-line-number="2410"></td>
-        <td id="LC2410" class="blob-code js-file-line"><span class="pl-c">/*</span></td>
-      </tr>
-      <tr>
-        <td id="L2411" class="blob-num js-line-number" data-line-number="2411"></td>
-        <td id="LC2411" class="blob-code js-file-line"><span class="pl-c">** These functions are slightly unwieldy and</span></td>
-      </tr>
-      <tr>
-        <td id="L2412" class="blob-num js-line-number" data-line-number="2412"></td>
-        <td id="LC2412" class="blob-code js-file-line"><span class="pl-c">** also the whole of the testing suite for mpc</span></td>
-      </tr>
-      <tr>
-        <td id="L2413" class="blob-num js-line-number" data-line-number="2413"></td>
-        <td id="LC2413" class="blob-code js-file-line"><span class="pl-c">** mpc is pretty shaky.</span></td>
-      </tr>
-      <tr>
-        <td id="L2414" class="blob-num js-line-number" data-line-number="2414"></td>
-        <td id="LC2414" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L2415" class="blob-num js-line-number" data-line-number="2415"></td>
-        <td id="LC2415" class="blob-code js-file-line"><span class="pl-c">** It could do with a lot more tests and more</span></td>
-      </tr>
-      <tr>
-        <td id="L2416" class="blob-num js-line-number" data-line-number="2416"></td>
-        <td id="LC2416" class="blob-code js-file-line"><span class="pl-c">** precision. Currently I am only really testing</span></td>
-      </tr>
-      <tr>
-        <td id="L2417" class="blob-num js-line-number" data-line-number="2417"></td>
-        <td id="LC2417" class="blob-code js-file-line"><span class="pl-c">** changes off of the examples.</span></td>
-      </tr>
-      <tr>
-        <td id="L2418" class="blob-num js-line-number" data-line-number="2418"></td>
-        <td id="LC2418" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L2419" class="blob-num js-line-number" data-line-number="2419"></td>
-        <td id="LC2419" class="blob-code js-file-line"><span class="pl-c">*/</span></td>
-      </tr>
-      <tr>
-        <td id="L2420" class="blob-num js-line-number" data-line-number="2420"></td>
-        <td id="LC2420" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2421" class="blob-num js-line-number" data-line-number="2421"></td>
-        <td id="LC2421" class="blob-code js-file-line"><span class="pl-st">int</span> <span class="pl-en">mpc_test_fail</span>(<span class="pl-s3">mpc_parser_t</span> *p, <span class="pl-s">const</span> <span class="pl-st">char</span> *s, <span class="pl-s">const</span> <span class="pl-st">void</span> *d,</td>
-      </tr>
-      <tr>
-        <td id="L2422" class="blob-num js-line-number" data-line-number="2422"></td>
-        <td id="LC2422" class="blob-code js-file-line">  <span class="pl-en">int</span>(*tester)(<span class="pl-s">const</span> <span class="pl-st">void</span>*, <span class="pl-s">const</span> <span class="pl-st">void</span>*),</td>
-      </tr>
-      <tr>
-        <td id="L2423" class="blob-num js-line-number" data-line-number="2423"></td>
-        <td id="LC2423" class="blob-code js-file-line">  mpc_dtor_t destructor,</td>
-      </tr>
-      <tr>
-        <td id="L2424" class="blob-num js-line-number" data-line-number="2424"></td>
-        <td id="LC2424" class="blob-code js-file-line">  void(*printer)(<span class="pl-s">const</span> <span class="pl-st">void</span>*)) {</td>
-      </tr>
-      <tr>
-        <td id="L2425" class="blob-num js-line-number" data-line-number="2425"></td>
-        <td id="LC2425" class="blob-code js-file-line">  <span class="pl-s3">mpc_result_t</span> r;</td>
-      </tr>
-      <tr>
-        <td id="L2426" class="blob-num js-line-number" data-line-number="2426"></td>
-        <td id="LC2426" class="blob-code js-file-line">  (<span class="pl-st">void</span>) printer;</td>
-      </tr>
-      <tr>
-        <td id="L2427" class="blob-num js-line-number" data-line-number="2427"></td>
-        <td id="LC2427" class="blob-code js-file-line">  <span class="pl-k">if</span> (<span class="pl-s3">mpc_parse</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>&lt;test&gt;<span class="pl-pds">&quot;</span></span>, s, p, &amp;r)) {</td>
-      </tr>
-      <tr>
-        <td id="L2428" class="blob-num js-line-number" data-line-number="2428"></td>
-        <td id="LC2428" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2429" class="blob-num js-line-number" data-line-number="2429"></td>
-        <td id="LC2429" class="blob-code js-file-line">    <span class="pl-k">if</span> (<span class="pl-s3">tester</span>(r.<span class="pl-vo">output</span>, d)) {</td>
-      </tr>
-      <tr>
-        <td id="L2430" class="blob-num js-line-number" data-line-number="2430"></td>
-        <td id="LC2430" class="blob-code js-file-line">      <span class="pl-s3">destructor</span>(r.<span class="pl-vo">output</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2431" class="blob-num js-line-number" data-line-number="2431"></td>
-        <td id="LC2431" class="blob-code js-file-line">      <span class="pl-k">return</span> <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L2432" class="blob-num js-line-number" data-line-number="2432"></td>
-        <td id="LC2432" class="blob-code js-file-line">    } <span class="pl-k">else</span> {</td>
-      </tr>
-      <tr>
-        <td id="L2433" class="blob-num js-line-number" data-line-number="2433"></td>
-        <td id="LC2433" class="blob-code js-file-line">      <span class="pl-s3">destructor</span>(r.<span class="pl-vo">output</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2434" class="blob-num js-line-number" data-line-number="2434"></td>
-        <td id="LC2434" class="blob-code js-file-line">      <span class="pl-k">return</span> <span class="pl-c1">1</span>;</td>
-      </tr>
-      <tr>
-        <td id="L2435" class="blob-num js-line-number" data-line-number="2435"></td>
-        <td id="LC2435" class="blob-code js-file-line">    }</td>
-      </tr>
-      <tr>
-        <td id="L2436" class="blob-num js-line-number" data-line-number="2436"></td>
-        <td id="LC2436" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2437" class="blob-num js-line-number" data-line-number="2437"></td>
-        <td id="LC2437" class="blob-code js-file-line">  } <span class="pl-k">else</span> {</td>
-      </tr>
-      <tr>
-        <td id="L2438" class="blob-num js-line-number" data-line-number="2438"></td>
-        <td id="LC2438" class="blob-code js-file-line">    <span class="pl-s3">mpc_err_delete</span>(r.<span class="pl-vo">error</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2439" class="blob-num js-line-number" data-line-number="2439"></td>
-        <td id="LC2439" class="blob-code js-file-line">    <span class="pl-k">return</span> <span class="pl-c1">1</span>;</td>
-      </tr>
-      <tr>
-        <td id="L2440" class="blob-num js-line-number" data-line-number="2440"></td>
-        <td id="LC2440" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L2441" class="blob-num js-line-number" data-line-number="2441"></td>
-        <td id="LC2441" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2442" class="blob-num js-line-number" data-line-number="2442"></td>
-        <td id="LC2442" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2443" class="blob-num js-line-number" data-line-number="2443"></td>
-        <td id="LC2443" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2444" class="blob-num js-line-number" data-line-number="2444"></td>
-        <td id="LC2444" class="blob-code js-file-line"><span class="pl-st">int</span> <span class="pl-en">mpc_test_pass</span>(<span class="pl-s3">mpc_parser_t</span> *p, <span class="pl-s">const</span> <span class="pl-st">char</span> *s, <span class="pl-s">const</span> <span class="pl-st">void</span> *d,</td>
-      </tr>
-      <tr>
-        <td id="L2445" class="blob-num js-line-number" data-line-number="2445"></td>
-        <td id="LC2445" class="blob-code js-file-line">  <span class="pl-en">int</span>(*tester)(<span class="pl-s">const</span> <span class="pl-st">void</span>*, <span class="pl-s">const</span> <span class="pl-st">void</span>*), </td>
-      </tr>
-      <tr>
-        <td id="L2446" class="blob-num js-line-number" data-line-number="2446"></td>
-        <td id="LC2446" class="blob-code js-file-line">  mpc_dtor_t destructor, </td>
-      </tr>
-      <tr>
-        <td id="L2447" class="blob-num js-line-number" data-line-number="2447"></td>
-        <td id="LC2447" class="blob-code js-file-line">  void(*printer)(<span class="pl-s">const</span> <span class="pl-st">void</span>*)) {</td>
-      </tr>
-      <tr>
-        <td id="L2448" class="blob-num js-line-number" data-line-number="2448"></td>
-        <td id="LC2448" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2449" class="blob-num js-line-number" data-line-number="2449"></td>
-        <td id="LC2449" class="blob-code js-file-line">  <span class="pl-s3">mpc_result_t</span> r;  </td>
-      </tr>
-      <tr>
-        <td id="L2450" class="blob-num js-line-number" data-line-number="2450"></td>
-        <td id="LC2450" class="blob-code js-file-line">  <span class="pl-k">if</span> (<span class="pl-s3">mpc_parse</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>&lt;test&gt;<span class="pl-pds">&quot;</span></span>, s, p, &amp;r)) {</td>
-      </tr>
-      <tr>
-        <td id="L2451" class="blob-num js-line-number" data-line-number="2451"></td>
-        <td id="LC2451" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L2452" class="blob-num js-line-number" data-line-number="2452"></td>
-        <td id="LC2452" class="blob-code js-file-line">    <span class="pl-k">if</span> (<span class="pl-s3">tester</span>(r.<span class="pl-vo">output</span>, d)) {</td>
-      </tr>
-      <tr>
-        <td id="L2453" class="blob-num js-line-number" data-line-number="2453"></td>
-        <td id="LC2453" class="blob-code js-file-line">      <span class="pl-s3">destructor</span>(r.<span class="pl-vo">output</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2454" class="blob-num js-line-number" data-line-number="2454"></td>
-        <td id="LC2454" class="blob-code js-file-line">      <span class="pl-k">return</span> <span class="pl-c1">1</span>;</td>
-      </tr>
-      <tr>
-        <td id="L2455" class="blob-num js-line-number" data-line-number="2455"></td>
-        <td id="LC2455" class="blob-code js-file-line">    } <span class="pl-k">else</span> {</td>
-      </tr>
-      <tr>
-        <td id="L2456" class="blob-num js-line-number" data-line-number="2456"></td>
-        <td id="LC2456" class="blob-code js-file-line">      <span class="pl-s3">printf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>Got <span class="pl-pds">&quot;</span></span>); <span class="pl-s3">printer</span>(r.<span class="pl-vo">output</span>); <span class="pl-s3">printf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-cce">\n</span><span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L2457" class="blob-num js-line-number" data-line-number="2457"></td>
-        <td id="LC2457" class="blob-code js-file-line">      <span class="pl-s3">printf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>Expected <span class="pl-pds">&quot;</span></span>); <span class="pl-s3">printer</span>(d); <span class="pl-s3">printf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-cce">\n</span><span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L2458" class="blob-num js-line-number" data-line-number="2458"></td>
-        <td id="LC2458" class="blob-code js-file-line">      <span class="pl-s3">destructor</span>(r.<span class="pl-vo">output</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2459" class="blob-num js-line-number" data-line-number="2459"></td>
-        <td id="LC2459" class="blob-code js-file-line">      <span class="pl-k">return</span> <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L2460" class="blob-num js-line-number" data-line-number="2460"></td>
-        <td id="LC2460" class="blob-code js-file-line">    }</td>
-      </tr>
-      <tr>
-        <td id="L2461" class="blob-num js-line-number" data-line-number="2461"></td>
-        <td id="LC2461" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L2462" class="blob-num js-line-number" data-line-number="2462"></td>
-        <td id="LC2462" class="blob-code js-file-line">  } <span class="pl-k">else</span> {    </td>
-      </tr>
-      <tr>
-        <td id="L2463" class="blob-num js-line-number" data-line-number="2463"></td>
-        <td id="LC2463" class="blob-code js-file-line">    <span class="pl-s3">mpc_err_print</span>(r.<span class="pl-vo">error</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2464" class="blob-num js-line-number" data-line-number="2464"></td>
-        <td id="LC2464" class="blob-code js-file-line">    <span class="pl-s3">mpc_err_delete</span>(r.<span class="pl-vo">error</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2465" class="blob-num js-line-number" data-line-number="2465"></td>
-        <td id="LC2465" class="blob-code js-file-line">    <span class="pl-k">return</span> <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L2466" class="blob-num js-line-number" data-line-number="2466"></td>
-        <td id="LC2466" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L2467" class="blob-num js-line-number" data-line-number="2467"></td>
-        <td id="LC2467" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L2468" class="blob-num js-line-number" data-line-number="2468"></td>
-        <td id="LC2468" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2469" class="blob-num js-line-number" data-line-number="2469"></td>
-        <td id="LC2469" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2470" class="blob-num js-line-number" data-line-number="2470"></td>
-        <td id="LC2470" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2471" class="blob-num js-line-number" data-line-number="2471"></td>
-        <td id="LC2471" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2472" class="blob-num js-line-number" data-line-number="2472"></td>
-        <td id="LC2472" class="blob-code js-file-line"><span class="pl-c">/*</span></td>
-      </tr>
-      <tr>
-        <td id="L2473" class="blob-num js-line-number" data-line-number="2473"></td>
-        <td id="LC2473" class="blob-code js-file-line"><span class="pl-c">** AST</span></td>
-      </tr>
-      <tr>
-        <td id="L2474" class="blob-num js-line-number" data-line-number="2474"></td>
-        <td id="LC2474" class="blob-code js-file-line"><span class="pl-c">*/</span></td>
-      </tr>
-      <tr>
-        <td id="L2475" class="blob-num js-line-number" data-line-number="2475"></td>
-        <td id="LC2475" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2476" class="blob-num js-line-number" data-line-number="2476"></td>
-        <td id="LC2476" class="blob-code js-file-line"><span class="pl-st">void</span> <span class="pl-en">mpc_ast_delete</span>(<span class="pl-s3">mpc_ast_t</span> *a) {</td>
-      </tr>
-      <tr>
-        <td id="L2477" class="blob-num js-line-number" data-line-number="2477"></td>
-        <td id="LC2477" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2478" class="blob-num js-line-number" data-line-number="2478"></td>
-        <td id="LC2478" class="blob-code js-file-line">  <span class="pl-st">int</span> i;</td>
-      </tr>
-      <tr>
-        <td id="L2479" class="blob-num js-line-number" data-line-number="2479"></td>
-        <td id="LC2479" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2480" class="blob-num js-line-number" data-line-number="2480"></td>
-        <td id="LC2480" class="blob-code js-file-line">  <span class="pl-k">if</span> (a == <span class="pl-c1">NULL</span>) { <span class="pl-k">return</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L2481" class="blob-num js-line-number" data-line-number="2481"></td>
-        <td id="LC2481" class="blob-code js-file-line">  <span class="pl-k">for</span> (i = <span class="pl-c1">0</span>; i &lt; a-&gt;children_num; i++) {</td>
-      </tr>
-      <tr>
-        <td id="L2482" class="blob-num js-line-number" data-line-number="2482"></td>
-        <td id="LC2482" class="blob-code js-file-line">    <span class="pl-s3">mpc_ast_delete</span>(a-&gt;children[i]);</td>
-      </tr>
-      <tr>
-        <td id="L2483" class="blob-num js-line-number" data-line-number="2483"></td>
-        <td id="LC2483" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L2484" class="blob-num js-line-number" data-line-number="2484"></td>
-        <td id="LC2484" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2485" class="blob-num js-line-number" data-line-number="2485"></td>
-        <td id="LC2485" class="blob-code js-file-line">  <span class="pl-s3">free</span>(a-&gt;children);</td>
-      </tr>
-      <tr>
-        <td id="L2486" class="blob-num js-line-number" data-line-number="2486"></td>
-        <td id="LC2486" class="blob-code js-file-line">  <span class="pl-s3">free</span>(a-&gt;tag);</td>
-      </tr>
-      <tr>
-        <td id="L2487" class="blob-num js-line-number" data-line-number="2487"></td>
-        <td id="LC2487" class="blob-code js-file-line">  <span class="pl-s3">free</span>(a-&gt;contents);</td>
-      </tr>
-      <tr>
-        <td id="L2488" class="blob-num js-line-number" data-line-number="2488"></td>
-        <td id="LC2488" class="blob-code js-file-line">  <span class="pl-s3">free</span>(a);</td>
-      </tr>
-      <tr>
-        <td id="L2489" class="blob-num js-line-number" data-line-number="2489"></td>
-        <td id="LC2489" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2490" class="blob-num js-line-number" data-line-number="2490"></td>
-        <td id="LC2490" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2491" class="blob-num js-line-number" data-line-number="2491"></td>
-        <td id="LC2491" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2492" class="blob-num js-line-number" data-line-number="2492"></td>
-        <td id="LC2492" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">void</span> <span class="pl-en">mpc_ast_delete_no_children</span>(<span class="pl-s3">mpc_ast_t</span> *a) {</td>
-      </tr>
-      <tr>
-        <td id="L2493" class="blob-num js-line-number" data-line-number="2493"></td>
-        <td id="LC2493" class="blob-code js-file-line">  <span class="pl-s3">free</span>(a-&gt;children);</td>
-      </tr>
-      <tr>
-        <td id="L2494" class="blob-num js-line-number" data-line-number="2494"></td>
-        <td id="LC2494" class="blob-code js-file-line">  <span class="pl-s3">free</span>(a-&gt;tag);</td>
-      </tr>
-      <tr>
-        <td id="L2495" class="blob-num js-line-number" data-line-number="2495"></td>
-        <td id="LC2495" class="blob-code js-file-line">  <span class="pl-s3">free</span>(a-&gt;contents);</td>
-      </tr>
-      <tr>
-        <td id="L2496" class="blob-num js-line-number" data-line-number="2496"></td>
-        <td id="LC2496" class="blob-code js-file-line">  <span class="pl-s3">free</span>(a);</td>
-      </tr>
-      <tr>
-        <td id="L2497" class="blob-num js-line-number" data-line-number="2497"></td>
-        <td id="LC2497" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2498" class="blob-num js-line-number" data-line-number="2498"></td>
-        <td id="LC2498" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2499" class="blob-num js-line-number" data-line-number="2499"></td>
-        <td id="LC2499" class="blob-code js-file-line"><span class="pl-s3">mpc_ast_t</span> *<span class="pl-en">mpc_ast_new</span>(<span class="pl-s">const</span> <span class="pl-st">char</span> *tag, <span class="pl-s">const</span> <span class="pl-st">char</span> *contents) {</td>
-      </tr>
-      <tr>
-        <td id="L2500" class="blob-num js-line-number" data-line-number="2500"></td>
-        <td id="LC2500" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2501" class="blob-num js-line-number" data-line-number="2501"></td>
-        <td id="LC2501" class="blob-code js-file-line">  <span class="pl-s3">mpc_ast_t</span> *a = <span class="pl-s3">malloc</span>(<span class="pl-k">sizeof</span>(<span class="pl-s3">mpc_ast_t</span>));</td>
-      </tr>
-      <tr>
-        <td id="L2502" class="blob-num js-line-number" data-line-number="2502"></td>
-        <td id="LC2502" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2503" class="blob-num js-line-number" data-line-number="2503"></td>
-        <td id="LC2503" class="blob-code js-file-line">  a-&gt;tag = <span class="pl-s3">malloc</span>(<span class="pl-s3">strlen</span>(tag) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2504" class="blob-num js-line-number" data-line-number="2504"></td>
-        <td id="LC2504" class="blob-code js-file-line">  <span class="pl-s3">strcpy</span>(a-&gt;tag, tag);</td>
-      </tr>
-      <tr>
-        <td id="L2505" class="blob-num js-line-number" data-line-number="2505"></td>
-        <td id="LC2505" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2506" class="blob-num js-line-number" data-line-number="2506"></td>
-        <td id="LC2506" class="blob-code js-file-line">  a-&gt;contents = <span class="pl-s3">malloc</span>(<span class="pl-s3">strlen</span>(contents) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2507" class="blob-num js-line-number" data-line-number="2507"></td>
-        <td id="LC2507" class="blob-code js-file-line">  <span class="pl-s3">strcpy</span>(a-&gt;contents, contents);</td>
-      </tr>
-      <tr>
-        <td id="L2508" class="blob-num js-line-number" data-line-number="2508"></td>
-        <td id="LC2508" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2509" class="blob-num js-line-number" data-line-number="2509"></td>
-        <td id="LC2509" class="blob-code js-file-line">  a-&gt;state = <span class="pl-s3">mpc_state_new</span>();</td>
-      </tr>
-      <tr>
-        <td id="L2510" class="blob-num js-line-number" data-line-number="2510"></td>
-        <td id="LC2510" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2511" class="blob-num js-line-number" data-line-number="2511"></td>
-        <td id="LC2511" class="blob-code js-file-line">  a-&gt;children_num = <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L2512" class="blob-num js-line-number" data-line-number="2512"></td>
-        <td id="LC2512" class="blob-code js-file-line">  a-&gt;children = <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L2513" class="blob-num js-line-number" data-line-number="2513"></td>
-        <td id="LC2513" class="blob-code js-file-line">  <span class="pl-k">return</span> a;</td>
-      </tr>
-      <tr>
-        <td id="L2514" class="blob-num js-line-number" data-line-number="2514"></td>
-        <td id="LC2514" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2515" class="blob-num js-line-number" data-line-number="2515"></td>
-        <td id="LC2515" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2516" class="blob-num js-line-number" data-line-number="2516"></td>
-        <td id="LC2516" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2517" class="blob-num js-line-number" data-line-number="2517"></td>
-        <td id="LC2517" class="blob-code js-file-line"><span class="pl-s3">mpc_ast_t</span> *<span class="pl-en">mpc_ast_build</span>(<span class="pl-st">int</span> n, <span class="pl-s">const</span> <span class="pl-st">char</span> *tag, ...) {</td>
-      </tr>
-      <tr>
-        <td id="L2518" class="blob-num js-line-number" data-line-number="2518"></td>
-        <td id="LC2518" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2519" class="blob-num js-line-number" data-line-number="2519"></td>
-        <td id="LC2519" class="blob-code js-file-line">  <span class="pl-s3">mpc_ast_t</span> *a = <span class="pl-s3">mpc_ast_new</span>(tag, <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L2520" class="blob-num js-line-number" data-line-number="2520"></td>
-        <td id="LC2520" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2521" class="blob-num js-line-number" data-line-number="2521"></td>
-        <td id="LC2521" class="blob-code js-file-line">  <span class="pl-st">int</span> i;</td>
-      </tr>
-      <tr>
-        <td id="L2522" class="blob-num js-line-number" data-line-number="2522"></td>
-        <td id="LC2522" class="blob-code js-file-line">  <span class="pl-s3">va_list</span> va;</td>
-      </tr>
-      <tr>
-        <td id="L2523" class="blob-num js-line-number" data-line-number="2523"></td>
-        <td id="LC2523" class="blob-code js-file-line">  <span class="pl-s3">va_start</span>(va, tag);</td>
-      </tr>
-      <tr>
-        <td id="L2524" class="blob-num js-line-number" data-line-number="2524"></td>
-        <td id="LC2524" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2525" class="blob-num js-line-number" data-line-number="2525"></td>
-        <td id="LC2525" class="blob-code js-file-line">  <span class="pl-k">for</span> (i = <span class="pl-c1">0</span>; i &lt; n; i++) {</td>
-      </tr>
-      <tr>
-        <td id="L2526" class="blob-num js-line-number" data-line-number="2526"></td>
-        <td id="LC2526" class="blob-code js-file-line">    <span class="pl-s3">mpc_ast_add_child</span>(a, <span class="pl-s3">va_arg</span>(va, <span class="pl-s3">mpc_ast_t</span>*));</td>
-      </tr>
-      <tr>
-        <td id="L2527" class="blob-num js-line-number" data-line-number="2527"></td>
-        <td id="LC2527" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L2528" class="blob-num js-line-number" data-line-number="2528"></td>
-        <td id="LC2528" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2529" class="blob-num js-line-number" data-line-number="2529"></td>
-        <td id="LC2529" class="blob-code js-file-line">  <span class="pl-s3">va_end</span>(va);</td>
-      </tr>
-      <tr>
-        <td id="L2530" class="blob-num js-line-number" data-line-number="2530"></td>
-        <td id="LC2530" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2531" class="blob-num js-line-number" data-line-number="2531"></td>
-        <td id="LC2531" class="blob-code js-file-line">  <span class="pl-k">return</span> a;</td>
-      </tr>
-      <tr>
-        <td id="L2532" class="blob-num js-line-number" data-line-number="2532"></td>
-        <td id="LC2532" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2533" class="blob-num js-line-number" data-line-number="2533"></td>
-        <td id="LC2533" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2534" class="blob-num js-line-number" data-line-number="2534"></td>
-        <td id="LC2534" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2535" class="blob-num js-line-number" data-line-number="2535"></td>
-        <td id="LC2535" class="blob-code js-file-line"><span class="pl-s3">mpc_ast_t</span> *<span class="pl-en">mpc_ast_add_root</span>(<span class="pl-s3">mpc_ast_t</span> *a) {</td>
-      </tr>
-      <tr>
-        <td id="L2536" class="blob-num js-line-number" data-line-number="2536"></td>
-        <td id="LC2536" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2537" class="blob-num js-line-number" data-line-number="2537"></td>
-        <td id="LC2537" class="blob-code js-file-line">  <span class="pl-s3">mpc_ast_t</span> *r;</td>
-      </tr>
-      <tr>
-        <td id="L2538" class="blob-num js-line-number" data-line-number="2538"></td>
-        <td id="LC2538" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2539" class="blob-num js-line-number" data-line-number="2539"></td>
-        <td id="LC2539" class="blob-code js-file-line">  <span class="pl-k">if</span> (a == <span class="pl-c1">NULL</span>) { <span class="pl-k">return</span> a; }</td>
-      </tr>
-      <tr>
-        <td id="L2540" class="blob-num js-line-number" data-line-number="2540"></td>
-        <td id="LC2540" class="blob-code js-file-line">  <span class="pl-k">if</span> (a-&gt;children_num == <span class="pl-c1">0</span>) { <span class="pl-k">return</span> a; }</td>
-      </tr>
-      <tr>
-        <td id="L2541" class="blob-num js-line-number" data-line-number="2541"></td>
-        <td id="LC2541" class="blob-code js-file-line">  <span class="pl-k">if</span> (a-&gt;children_num == <span class="pl-c1">1</span>) { <span class="pl-k">return</span> a; }</td>
-      </tr>
-      <tr>
-        <td id="L2542" class="blob-num js-line-number" data-line-number="2542"></td>
-        <td id="LC2542" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2543" class="blob-num js-line-number" data-line-number="2543"></td>
-        <td id="LC2543" class="blob-code js-file-line">  r = <span class="pl-s3">mpc_ast_new</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>&gt;<span class="pl-pds">&quot;</span></span>, <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L2544" class="blob-num js-line-number" data-line-number="2544"></td>
-        <td id="LC2544" class="blob-code js-file-line">  <span class="pl-s3">mpc_ast_add_child</span>(r, a);</td>
-      </tr>
-      <tr>
-        <td id="L2545" class="blob-num js-line-number" data-line-number="2545"></td>
-        <td id="LC2545" class="blob-code js-file-line">  <span class="pl-k">return</span> r;</td>
-      </tr>
-      <tr>
-        <td id="L2546" class="blob-num js-line-number" data-line-number="2546"></td>
-        <td id="LC2546" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2547" class="blob-num js-line-number" data-line-number="2547"></td>
-        <td id="LC2547" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2548" class="blob-num js-line-number" data-line-number="2548"></td>
-        <td id="LC2548" class="blob-code js-file-line"><span class="pl-st">int</span> <span class="pl-en">mpc_ast_eq</span>(<span class="pl-s3">mpc_ast_t</span> *a, <span class="pl-s3">mpc_ast_t</span> *b) {</td>
-      </tr>
-      <tr>
-        <td id="L2549" class="blob-num js-line-number" data-line-number="2549"></td>
-        <td id="LC2549" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2550" class="blob-num js-line-number" data-line-number="2550"></td>
-        <td id="LC2550" class="blob-code js-file-line">  <span class="pl-st">int</span> i;</td>
-      </tr>
-      <tr>
-        <td id="L2551" class="blob-num js-line-number" data-line-number="2551"></td>
-        <td id="LC2551" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2552" class="blob-num js-line-number" data-line-number="2552"></td>
-        <td id="LC2552" class="blob-code js-file-line">  <span class="pl-k">if</span> (<span class="pl-s3">strcmp</span>(a-&gt;tag, b-&gt;tag) != <span class="pl-c1">0</span>) { <span class="pl-k">return</span> <span class="pl-c1">0</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L2553" class="blob-num js-line-number" data-line-number="2553"></td>
-        <td id="LC2553" class="blob-code js-file-line">  <span class="pl-k">if</span> (<span class="pl-s3">strcmp</span>(a-&gt;contents, b-&gt;contents) != <span class="pl-c1">0</span>) { <span class="pl-k">return</span> <span class="pl-c1">0</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L2554" class="blob-num js-line-number" data-line-number="2554"></td>
-        <td id="LC2554" class="blob-code js-file-line">  <span class="pl-k">if</span> (a-&gt;children_num != b-&gt;children_num) { <span class="pl-k">return</span> <span class="pl-c1">0</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L2555" class="blob-num js-line-number" data-line-number="2555"></td>
-        <td id="LC2555" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2556" class="blob-num js-line-number" data-line-number="2556"></td>
-        <td id="LC2556" class="blob-code js-file-line">  <span class="pl-k">for</span> (i = <span class="pl-c1">0</span>; i &lt; a-&gt;children_num; i++) {</td>
-      </tr>
-      <tr>
-        <td id="L2557" class="blob-num js-line-number" data-line-number="2557"></td>
-        <td id="LC2557" class="blob-code js-file-line">    <span class="pl-k">if</span> (!<span class="pl-s3">mpc_ast_eq</span>(a-&gt;children[i], b-&gt;children[i])) { <span class="pl-k">return</span> <span class="pl-c1">0</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L2558" class="blob-num js-line-number" data-line-number="2558"></td>
-        <td id="LC2558" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L2559" class="blob-num js-line-number" data-line-number="2559"></td>
-        <td id="LC2559" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2560" class="blob-num js-line-number" data-line-number="2560"></td>
-        <td id="LC2560" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-c1">1</span>;</td>
-      </tr>
-      <tr>
-        <td id="L2561" class="blob-num js-line-number" data-line-number="2561"></td>
-        <td id="LC2561" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2562" class="blob-num js-line-number" data-line-number="2562"></td>
-        <td id="LC2562" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2563" class="blob-num js-line-number" data-line-number="2563"></td>
-        <td id="LC2563" class="blob-code js-file-line"><span class="pl-s3">mpc_ast_t</span> *<span class="pl-en">mpc_ast_add_child</span>(<span class="pl-s3">mpc_ast_t</span> *r, <span class="pl-s3">mpc_ast_t</span> *a) {</td>
-      </tr>
-      <tr>
-        <td id="L2564" class="blob-num js-line-number" data-line-number="2564"></td>
-        <td id="LC2564" class="blob-code js-file-line">  r-&gt;children_num++;</td>
-      </tr>
-      <tr>
-        <td id="L2565" class="blob-num js-line-number" data-line-number="2565"></td>
-        <td id="LC2565" class="blob-code js-file-line">  r-&gt;children = <span class="pl-s3">realloc</span>(r-&gt;children, <span class="pl-k">sizeof</span>(<span class="pl-s3">mpc_ast_t</span>*) * r-&gt;children_num);</td>
-      </tr>
-      <tr>
-        <td id="L2566" class="blob-num js-line-number" data-line-number="2566"></td>
-        <td id="LC2566" class="blob-code js-file-line">  r-&gt;children[r-&gt;children_num-<span class="pl-c1">1</span>] = a;</td>
-      </tr>
-      <tr>
-        <td id="L2567" class="blob-num js-line-number" data-line-number="2567"></td>
-        <td id="LC2567" class="blob-code js-file-line">  <span class="pl-k">return</span> r;</td>
-      </tr>
-      <tr>
-        <td id="L2568" class="blob-num js-line-number" data-line-number="2568"></td>
-        <td id="LC2568" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2569" class="blob-num js-line-number" data-line-number="2569"></td>
-        <td id="LC2569" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2570" class="blob-num js-line-number" data-line-number="2570"></td>
-        <td id="LC2570" class="blob-code js-file-line"><span class="pl-s3">mpc_ast_t</span> *<span class="pl-en">mpc_ast_add_tag</span>(<span class="pl-s3">mpc_ast_t</span> *a, <span class="pl-s">const</span> <span class="pl-st">char</span> *t) {</td>
-      </tr>
-      <tr>
-        <td id="L2571" class="blob-num js-line-number" data-line-number="2571"></td>
-        <td id="LC2571" class="blob-code js-file-line">  <span class="pl-k">if</span> (a == <span class="pl-c1">NULL</span>) { <span class="pl-k">return</span> a; }</td>
-      </tr>
-      <tr>
-        <td id="L2572" class="blob-num js-line-number" data-line-number="2572"></td>
-        <td id="LC2572" class="blob-code js-file-line">  a-&gt;tag = <span class="pl-s3">realloc</span>(a-&gt;tag, <span class="pl-s3">strlen</span>(t) + <span class="pl-c1">1</span> + <span class="pl-s3">strlen</span>(a-&gt;tag) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2573" class="blob-num js-line-number" data-line-number="2573"></td>
-        <td id="LC2573" class="blob-code js-file-line">  <span class="pl-s3">memmove</span>(a-&gt;tag + <span class="pl-s3">strlen</span>(t) + <span class="pl-c1">1</span>, a-&gt;tag, <span class="pl-s3">strlen</span>(a-&gt;tag)+<span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2574" class="blob-num js-line-number" data-line-number="2574"></td>
-        <td id="LC2574" class="blob-code js-file-line">  <span class="pl-s3">memmove</span>(a-&gt;tag, t, <span class="pl-s3">strlen</span>(t));</td>
-      </tr>
-      <tr>
-        <td id="L2575" class="blob-num js-line-number" data-line-number="2575"></td>
-        <td id="LC2575" class="blob-code js-file-line">  <span class="pl-s3">memmove</span>(a-&gt;tag + <span class="pl-s3">strlen</span>(t), <span class="pl-s1"><span class="pl-pds">&quot;</span>|<span class="pl-pds">&quot;</span></span>, <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2576" class="blob-num js-line-number" data-line-number="2576"></td>
-        <td id="LC2576" class="blob-code js-file-line">  <span class="pl-k">return</span> a;</td>
-      </tr>
-      <tr>
-        <td id="L2577" class="blob-num js-line-number" data-line-number="2577"></td>
-        <td id="LC2577" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2578" class="blob-num js-line-number" data-line-number="2578"></td>
-        <td id="LC2578" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2579" class="blob-num js-line-number" data-line-number="2579"></td>
-        <td id="LC2579" class="blob-code js-file-line"><span class="pl-s3">mpc_ast_t</span> *<span class="pl-en">mpc_ast_tag</span>(<span class="pl-s3">mpc_ast_t</span> *a, <span class="pl-s">const</span> <span class="pl-st">char</span> *t) {</td>
-      </tr>
-      <tr>
-        <td id="L2580" class="blob-num js-line-number" data-line-number="2580"></td>
-        <td id="LC2580" class="blob-code js-file-line">  a-&gt;tag = <span class="pl-s3">realloc</span>(a-&gt;tag, <span class="pl-s3">strlen</span>(t) + <span class="pl-c1">1</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2581" class="blob-num js-line-number" data-line-number="2581"></td>
-        <td id="LC2581" class="blob-code js-file-line">  <span class="pl-s3">strcpy</span>(a-&gt;tag, t);</td>
-      </tr>
-      <tr>
-        <td id="L2582" class="blob-num js-line-number" data-line-number="2582"></td>
-        <td id="LC2582" class="blob-code js-file-line">  <span class="pl-k">return</span> a;</td>
-      </tr>
-      <tr>
-        <td id="L2583" class="blob-num js-line-number" data-line-number="2583"></td>
-        <td id="LC2583" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2584" class="blob-num js-line-number" data-line-number="2584"></td>
-        <td id="LC2584" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2585" class="blob-num js-line-number" data-line-number="2585"></td>
-        <td id="LC2585" class="blob-code js-file-line"><span class="pl-s3">mpc_ast_t</span> *<span class="pl-en">mpc_ast_state</span>(<span class="pl-s3">mpc_ast_t</span> *a, <span class="pl-s3">mpc_state_t</span> s) {</td>
-      </tr>
-      <tr>
-        <td id="L2586" class="blob-num js-line-number" data-line-number="2586"></td>
-        <td id="LC2586" class="blob-code js-file-line">  <span class="pl-k">if</span> (a == <span class="pl-c1">NULL</span>) { <span class="pl-k">return</span> a; }</td>
-      </tr>
-      <tr>
-        <td id="L2587" class="blob-num js-line-number" data-line-number="2587"></td>
-        <td id="LC2587" class="blob-code js-file-line">  a-&gt;state = s;</td>
-      </tr>
-      <tr>
-        <td id="L2588" class="blob-num js-line-number" data-line-number="2588"></td>
-        <td id="LC2588" class="blob-code js-file-line">  <span class="pl-k">return</span> a;</td>
-      </tr>
-      <tr>
-        <td id="L2589" class="blob-num js-line-number" data-line-number="2589"></td>
-        <td id="LC2589" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2590" class="blob-num js-line-number" data-line-number="2590"></td>
-        <td id="LC2590" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2591" class="blob-num js-line-number" data-line-number="2591"></td>
-        <td id="LC2591" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">void</span> <span class="pl-en">mpc_ast_print_depth</span>(<span class="pl-s3">mpc_ast_t</span> *a, <span class="pl-st">int</span> d, <span class="pl-s3">FILE</span> *fp) {</td>
-      </tr>
-      <tr>
-        <td id="L2592" class="blob-num js-line-number" data-line-number="2592"></td>
-        <td id="LC2592" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2593" class="blob-num js-line-number" data-line-number="2593"></td>
-        <td id="LC2593" class="blob-code js-file-line">  <span class="pl-st">int</span> i;</td>
-      </tr>
-      <tr>
-        <td id="L2594" class="blob-num js-line-number" data-line-number="2594"></td>
-        <td id="LC2594" class="blob-code js-file-line">  <span class="pl-k">for</span> (i = <span class="pl-c1">0</span>; i &lt; d; i++) { <span class="pl-s3">fprintf</span>(fp, <span class="pl-s1"><span class="pl-pds">&quot;</span>  <span class="pl-pds">&quot;</span></span>); }</td>
-      </tr>
-      <tr>
-        <td id="L2595" class="blob-num js-line-number" data-line-number="2595"></td>
-        <td id="LC2595" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2596" class="blob-num js-line-number" data-line-number="2596"></td>
-        <td id="LC2596" class="blob-code js-file-line">  <span class="pl-k">if</span> (<span class="pl-s3">strlen</span>(a-&gt;contents)) {</td>
-      </tr>
-      <tr>
-        <td id="L2597" class="blob-num js-line-number" data-line-number="2597"></td>
-        <td id="LC2597" class="blob-code js-file-line">    <span class="pl-s3">fprintf</span>(fp, <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-c1">%s</span>:<span class="pl-c1">%lu</span>:<span class="pl-c1">%lu</span> &#39;<span class="pl-c1">%s</span>&#39;<span class="pl-cce">\n</span><span class="pl-pds">&quot;</span></span>, a-&gt;tag, </td>
-      </tr>
-      <tr>
-        <td id="L2598" class="blob-num js-line-number" data-line-number="2598"></td>
-        <td id="LC2598" class="blob-code js-file-line">      (<span class="pl-st">long</span> <span class="pl-st">unsigned</span> <span class="pl-st">int</span>)(a-&gt;state.<span class="pl-vo">row</span>+<span class="pl-c1">1</span>),</td>
-      </tr>
-      <tr>
-        <td id="L2599" class="blob-num js-line-number" data-line-number="2599"></td>
-        <td id="LC2599" class="blob-code js-file-line">      (<span class="pl-st">long</span> <span class="pl-st">unsigned</span> <span class="pl-st">int</span>)(a-&gt;state.<span class="pl-vo">col</span>+<span class="pl-c1">1</span>),</td>
-      </tr>
-      <tr>
-        <td id="L2600" class="blob-num js-line-number" data-line-number="2600"></td>
-        <td id="LC2600" class="blob-code js-file-line">      a-&gt;contents);</td>
-      </tr>
-      <tr>
-        <td id="L2601" class="blob-num js-line-number" data-line-number="2601"></td>
-        <td id="LC2601" class="blob-code js-file-line">  } <span class="pl-k">else</span> {</td>
-      </tr>
-      <tr>
-        <td id="L2602" class="blob-num js-line-number" data-line-number="2602"></td>
-        <td id="LC2602" class="blob-code js-file-line">    <span class="pl-s3">fprintf</span>(fp, <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-c1">%s</span> <span class="pl-cce">\n</span><span class="pl-pds">&quot;</span></span>, a-&gt;tag);</td>
-      </tr>
-      <tr>
-        <td id="L2603" class="blob-num js-line-number" data-line-number="2603"></td>
-        <td id="LC2603" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L2604" class="blob-num js-line-number" data-line-number="2604"></td>
-        <td id="LC2604" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2605" class="blob-num js-line-number" data-line-number="2605"></td>
-        <td id="LC2605" class="blob-code js-file-line">  <span class="pl-k">for</span> (i = <span class="pl-c1">0</span>; i &lt; a-&gt;children_num; i++) {</td>
-      </tr>
-      <tr>
-        <td id="L2606" class="blob-num js-line-number" data-line-number="2606"></td>
-        <td id="LC2606" class="blob-code js-file-line">    <span class="pl-s3">mpc_ast_print_depth</span>(a-&gt;children[i], d+<span class="pl-c1">1</span>, fp);</td>
-      </tr>
-      <tr>
-        <td id="L2607" class="blob-num js-line-number" data-line-number="2607"></td>
-        <td id="LC2607" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L2608" class="blob-num js-line-number" data-line-number="2608"></td>
-        <td id="LC2608" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2609" class="blob-num js-line-number" data-line-number="2609"></td>
-        <td id="LC2609" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2610" class="blob-num js-line-number" data-line-number="2610"></td>
-        <td id="LC2610" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2611" class="blob-num js-line-number" data-line-number="2611"></td>
-        <td id="LC2611" class="blob-code js-file-line"><span class="pl-st">void</span> <span class="pl-en">mpc_ast_print</span>(<span class="pl-s3">mpc_ast_t</span> *a) {</td>
-      </tr>
-      <tr>
-        <td id="L2612" class="blob-num js-line-number" data-line-number="2612"></td>
-        <td id="LC2612" class="blob-code js-file-line">  <span class="pl-s3">mpc_ast_print_depth</span>(a, <span class="pl-c1">0</span>, stdout);</td>
-      </tr>
-      <tr>
-        <td id="L2613" class="blob-num js-line-number" data-line-number="2613"></td>
-        <td id="LC2613" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2614" class="blob-num js-line-number" data-line-number="2614"></td>
-        <td id="LC2614" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2615" class="blob-num js-line-number" data-line-number="2615"></td>
-        <td id="LC2615" class="blob-code js-file-line"><span class="pl-st">void</span> <span class="pl-en">mpc_ast_print_to</span>(<span class="pl-s3">mpc_ast_t</span> *a, <span class="pl-s3">FILE</span> *fp) {</td>
-      </tr>
-      <tr>
-        <td id="L2616" class="blob-num js-line-number" data-line-number="2616"></td>
-        <td id="LC2616" class="blob-code js-file-line">  <span class="pl-s3">mpc_ast_print_depth</span>(a, <span class="pl-c1">0</span>, fp);</td>
-      </tr>
-      <tr>
-        <td id="L2617" class="blob-num js-line-number" data-line-number="2617"></td>
-        <td id="LC2617" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2618" class="blob-num js-line-number" data-line-number="2618"></td>
-        <td id="LC2618" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2619" class="blob-num js-line-number" data-line-number="2619"></td>
-        <td id="LC2619" class="blob-code js-file-line"><span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_fold_ast</span>(<span class="pl-st">int</span> n, <span class="pl-s3">mpc_val_t</span> **xs) {</td>
-      </tr>
-      <tr>
-        <td id="L2620" class="blob-num js-line-number" data-line-number="2620"></td>
-        <td id="LC2620" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2621" class="blob-num js-line-number" data-line-number="2621"></td>
-        <td id="LC2621" class="blob-code js-file-line">  <span class="pl-st">int</span> i, j;</td>
-      </tr>
-      <tr>
-        <td id="L2622" class="blob-num js-line-number" data-line-number="2622"></td>
-        <td id="LC2622" class="blob-code js-file-line">  <span class="pl-s3">mpc_ast_t</span>** as = (<span class="pl-s3">mpc_ast_t</span>**)xs;</td>
-      </tr>
-      <tr>
-        <td id="L2623" class="blob-num js-line-number" data-line-number="2623"></td>
-        <td id="LC2623" class="blob-code js-file-line">  <span class="pl-s3">mpc_ast_t</span> *r;</td>
-      </tr>
-      <tr>
-        <td id="L2624" class="blob-num js-line-number" data-line-number="2624"></td>
-        <td id="LC2624" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2625" class="blob-num js-line-number" data-line-number="2625"></td>
-        <td id="LC2625" class="blob-code js-file-line">  <span class="pl-k">if</span> (n == <span class="pl-c1">0</span>) { <span class="pl-k">return</span> <span class="pl-c1">NULL</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L2626" class="blob-num js-line-number" data-line-number="2626"></td>
-        <td id="LC2626" class="blob-code js-file-line">  <span class="pl-k">if</span> (n == <span class="pl-c1">1</span>) { <span class="pl-k">return</span> xs[<span class="pl-c1">0</span>]; }</td>
-      </tr>
-      <tr>
-        <td id="L2627" class="blob-num js-line-number" data-line-number="2627"></td>
-        <td id="LC2627" class="blob-code js-file-line">  <span class="pl-k">if</span> (n == <span class="pl-c1">2</span> &amp;&amp; xs[<span class="pl-c1">1</span>] == <span class="pl-c1">NULL</span>) { <span class="pl-k">return</span> xs[<span class="pl-c1">0</span>]; }</td>
-      </tr>
-      <tr>
-        <td id="L2628" class="blob-num js-line-number" data-line-number="2628"></td>
-        <td id="LC2628" class="blob-code js-file-line">  <span class="pl-k">if</span> (n == <span class="pl-c1">2</span> &amp;&amp; xs[<span class="pl-c1">0</span>] == <span class="pl-c1">NULL</span>) { <span class="pl-k">return</span> xs[<span class="pl-c1">1</span>]; }</td>
-      </tr>
-      <tr>
-        <td id="L2629" class="blob-num js-line-number" data-line-number="2629"></td>
-        <td id="LC2629" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2630" class="blob-num js-line-number" data-line-number="2630"></td>
-        <td id="LC2630" class="blob-code js-file-line">  r = <span class="pl-s3">mpc_ast_new</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>&gt;<span class="pl-pds">&quot;</span></span>, <span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L2631" class="blob-num js-line-number" data-line-number="2631"></td>
-        <td id="LC2631" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2632" class="blob-num js-line-number" data-line-number="2632"></td>
-        <td id="LC2632" class="blob-code js-file-line">  <span class="pl-k">for</span> (i = <span class="pl-c1">0</span>; i &lt; n; i++) {</td>
-      </tr>
-      <tr>
-        <td id="L2633" class="blob-num js-line-number" data-line-number="2633"></td>
-        <td id="LC2633" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L2634" class="blob-num js-line-number" data-line-number="2634"></td>
-        <td id="LC2634" class="blob-code js-file-line">    <span class="pl-k">if</span> (as[i] == <span class="pl-c1">NULL</span>) { <span class="pl-k">continue</span>; }</td>
-      </tr>
-      <tr>
-        <td id="L2635" class="blob-num js-line-number" data-line-number="2635"></td>
-        <td id="LC2635" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L2636" class="blob-num js-line-number" data-line-number="2636"></td>
-        <td id="LC2636" class="blob-code js-file-line">    <span class="pl-k">if</span> (as[i] &amp;&amp; as[i]-&gt;children_num &gt; <span class="pl-c1">0</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L2637" class="blob-num js-line-number" data-line-number="2637"></td>
-        <td id="LC2637" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L2638" class="blob-num js-line-number" data-line-number="2638"></td>
-        <td id="LC2638" class="blob-code js-file-line">      <span class="pl-k">for</span> (j = <span class="pl-c1">0</span>; j &lt; as[i]-&gt;children_num; j++) {</td>
-      </tr>
-      <tr>
-        <td id="L2639" class="blob-num js-line-number" data-line-number="2639"></td>
-        <td id="LC2639" class="blob-code js-file-line">        <span class="pl-s3">mpc_ast_add_child</span>(r, as[i]-&gt;children[j]);</td>
-      </tr>
-      <tr>
-        <td id="L2640" class="blob-num js-line-number" data-line-number="2640"></td>
-        <td id="LC2640" class="blob-code js-file-line">      }</td>
-      </tr>
-      <tr>
-        <td id="L2641" class="blob-num js-line-number" data-line-number="2641"></td>
-        <td id="LC2641" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L2642" class="blob-num js-line-number" data-line-number="2642"></td>
-        <td id="LC2642" class="blob-code js-file-line">      <span class="pl-s3">mpc_ast_delete_no_children</span>(as[i]);</td>
-      </tr>
-      <tr>
-        <td id="L2643" class="blob-num js-line-number" data-line-number="2643"></td>
-        <td id="LC2643" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L2644" class="blob-num js-line-number" data-line-number="2644"></td>
-        <td id="LC2644" class="blob-code js-file-line">    } <span class="pl-k">else</span> <span class="pl-k">if</span> (as[i] &amp;&amp; as[i]-&gt;children_num == <span class="pl-c1">0</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L2645" class="blob-num js-line-number" data-line-number="2645"></td>
-        <td id="LC2645" class="blob-code js-file-line">      <span class="pl-s3">mpc_ast_add_child</span>(r, as[i]);</td>
-      </tr>
-      <tr>
-        <td id="L2646" class="blob-num js-line-number" data-line-number="2646"></td>
-        <td id="LC2646" class="blob-code js-file-line">    }</td>
-      </tr>
-      <tr>
-        <td id="L2647" class="blob-num js-line-number" data-line-number="2647"></td>
-        <td id="LC2647" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2648" class="blob-num js-line-number" data-line-number="2648"></td>
-        <td id="LC2648" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L2649" class="blob-num js-line-number" data-line-number="2649"></td>
-        <td id="LC2649" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2650" class="blob-num js-line-number" data-line-number="2650"></td>
-        <td id="LC2650" class="blob-code js-file-line">  <span class="pl-k">if</span> (r-&gt;children_num) {</td>
-      </tr>
-      <tr>
-        <td id="L2651" class="blob-num js-line-number" data-line-number="2651"></td>
-        <td id="LC2651" class="blob-code js-file-line">    r-&gt;state = r-&gt;children[<span class="pl-c1">0</span>]-&gt;state;</td>
-      </tr>
-      <tr>
-        <td id="L2652" class="blob-num js-line-number" data-line-number="2652"></td>
-        <td id="LC2652" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L2653" class="blob-num js-line-number" data-line-number="2653"></td>
-        <td id="LC2653" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2654" class="blob-num js-line-number" data-line-number="2654"></td>
-        <td id="LC2654" class="blob-code js-file-line">  <span class="pl-k">return</span> r;</td>
-      </tr>
-      <tr>
-        <td id="L2655" class="blob-num js-line-number" data-line-number="2655"></td>
-        <td id="LC2655" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2656" class="blob-num js-line-number" data-line-number="2656"></td>
-        <td id="LC2656" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2657" class="blob-num js-line-number" data-line-number="2657"></td>
-        <td id="LC2657" class="blob-code js-file-line"><span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_str_ast</span>(<span class="pl-s3">mpc_val_t</span> *c) {</td>
-      </tr>
-      <tr>
-        <td id="L2658" class="blob-num js-line-number" data-line-number="2658"></td>
-        <td id="LC2658" class="blob-code js-file-line">  <span class="pl-s3">mpc_ast_t</span> *a = <span class="pl-s3">mpc_ast_new</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span><span class="pl-pds">&quot;</span></span>, c);</td>
-      </tr>
-      <tr>
-        <td id="L2659" class="blob-num js-line-number" data-line-number="2659"></td>
-        <td id="LC2659" class="blob-code js-file-line">  <span class="pl-s3">free</span>(c);</td>
-      </tr>
-      <tr>
-        <td id="L2660" class="blob-num js-line-number" data-line-number="2660"></td>
-        <td id="LC2660" class="blob-code js-file-line">  <span class="pl-k">return</span> a;</td>
-      </tr>
-      <tr>
-        <td id="L2661" class="blob-num js-line-number" data-line-number="2661"></td>
-        <td id="LC2661" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2662" class="blob-num js-line-number" data-line-number="2662"></td>
-        <td id="LC2662" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2663" class="blob-num js-line-number" data-line-number="2663"></td>
-        <td id="LC2663" class="blob-code js-file-line"><span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcf_state_ast</span>(<span class="pl-st">int</span> n, <span class="pl-s3">mpc_val_t</span> **xs) {</td>
-      </tr>
-      <tr>
-        <td id="L2664" class="blob-num js-line-number" data-line-number="2664"></td>
-        <td id="LC2664" class="blob-code js-file-line">  <span class="pl-s3">mpc_state_t</span> *s = ((<span class="pl-s3">mpc_state_t</span>**)xs)[<span class="pl-c1">0</span>];</td>
-      </tr>
-      <tr>
-        <td id="L2665" class="blob-num js-line-number" data-line-number="2665"></td>
-        <td id="LC2665" class="blob-code js-file-line">  <span class="pl-s3">mpc_ast_t</span> *a = ((<span class="pl-s3">mpc_ast_t</span>**)xs)[<span class="pl-c1">1</span>];</td>
-      </tr>
-      <tr>
-        <td id="L2666" class="blob-num js-line-number" data-line-number="2666"></td>
-        <td id="LC2666" class="blob-code js-file-line">  a = <span class="pl-s3">mpc_ast_state</span>(a, *s);</td>
-      </tr>
-      <tr>
-        <td id="L2667" class="blob-num js-line-number" data-line-number="2667"></td>
-        <td id="LC2667" class="blob-code js-file-line">  <span class="pl-s3">free</span>(s);</td>
-      </tr>
-      <tr>
-        <td id="L2668" class="blob-num js-line-number" data-line-number="2668"></td>
-        <td id="LC2668" class="blob-code js-file-line">  (<span class="pl-st">void</span>) n;</td>
-      </tr>
-      <tr>
-        <td id="L2669" class="blob-num js-line-number" data-line-number="2669"></td>
-        <td id="LC2669" class="blob-code js-file-line">  <span class="pl-k">return</span> a;</td>
-      </tr>
-      <tr>
-        <td id="L2670" class="blob-num js-line-number" data-line-number="2670"></td>
-        <td id="LC2670" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2671" class="blob-num js-line-number" data-line-number="2671"></td>
-        <td id="LC2671" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2672" class="blob-num js-line-number" data-line-number="2672"></td>
-        <td id="LC2672" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpca_state</span>(<span class="pl-s3">mpc_parser_t</span> *a) {</td>
-      </tr>
-      <tr>
-        <td id="L2673" class="blob-num js-line-number" data-line-number="2673"></td>
-        <td id="LC2673" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">mpc_and</span>(<span class="pl-c1">2</span>, mpcf_state_ast, <span class="pl-s3">mpc_state</span>(), a, <span class="pl-s3">free</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2674" class="blob-num js-line-number" data-line-number="2674"></td>
-        <td id="LC2674" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2675" class="blob-num js-line-number" data-line-number="2675"></td>
-        <td id="LC2675" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2676" class="blob-num js-line-number" data-line-number="2676"></td>
-        <td id="LC2676" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpca_tag</span>(<span class="pl-s3">mpc_parser_t</span> *a, <span class="pl-s">const</span> <span class="pl-st">char</span> *t) {</td>
-      </tr>
-      <tr>
-        <td id="L2677" class="blob-num js-line-number" data-line-number="2677"></td>
-        <td id="LC2677" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">mpc_apply_to</span>(a, (<span class="pl-s3">mpc_apply_to_t</span>)mpc_ast_tag, (<span class="pl-st">void</span>*)t);</td>
-      </tr>
-      <tr>
-        <td id="L2678" class="blob-num js-line-number" data-line-number="2678"></td>
-        <td id="LC2678" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2679" class="blob-num js-line-number" data-line-number="2679"></td>
-        <td id="LC2679" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2680" class="blob-num js-line-number" data-line-number="2680"></td>
-        <td id="LC2680" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpca_add_tag</span>(<span class="pl-s3">mpc_parser_t</span> *a, <span class="pl-s">const</span> <span class="pl-st">char</span> *t) {</td>
-      </tr>
-      <tr>
-        <td id="L2681" class="blob-num js-line-number" data-line-number="2681"></td>
-        <td id="LC2681" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">mpc_apply_to</span>(a, (<span class="pl-s3">mpc_apply_to_t</span>)mpc_ast_add_tag, (<span class="pl-st">void</span>*)t);</td>
-      </tr>
-      <tr>
-        <td id="L2682" class="blob-num js-line-number" data-line-number="2682"></td>
-        <td id="LC2682" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2683" class="blob-num js-line-number" data-line-number="2683"></td>
-        <td id="LC2683" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2684" class="blob-num js-line-number" data-line-number="2684"></td>
-        <td id="LC2684" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpca_root</span>(<span class="pl-s3">mpc_parser_t</span> *a) {</td>
-      </tr>
-      <tr>
-        <td id="L2685" class="blob-num js-line-number" data-line-number="2685"></td>
-        <td id="LC2685" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">mpc_apply</span>(a, (<span class="pl-s3">mpc_apply_t</span>)mpc_ast_add_root);</td>
-      </tr>
-      <tr>
-        <td id="L2686" class="blob-num js-line-number" data-line-number="2686"></td>
-        <td id="LC2686" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2687" class="blob-num js-line-number" data-line-number="2687"></td>
-        <td id="LC2687" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2688" class="blob-num js-line-number" data-line-number="2688"></td>
-        <td id="LC2688" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpca_not</span>(<span class="pl-s3">mpc_parser_t</span> *a) { <span class="pl-k">return</span> <span class="pl-s3">mpc_not</span>(a, (<span class="pl-s3">mpc_dtor_t</span>)mpc_ast_delete); }</td>
-      </tr>
-      <tr>
-        <td id="L2689" class="blob-num js-line-number" data-line-number="2689"></td>
-        <td id="LC2689" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpca_maybe</span>(<span class="pl-s3">mpc_parser_t</span> *a) { <span class="pl-k">return</span> <span class="pl-s3">mpc_maybe</span>(a); }</td>
-      </tr>
-      <tr>
-        <td id="L2690" class="blob-num js-line-number" data-line-number="2690"></td>
-        <td id="LC2690" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpca_many</span>(<span class="pl-s3">mpc_parser_t</span> *a) { <span class="pl-k">return</span> <span class="pl-s3">mpc_many</span>(mpcf_fold_ast, a); }</td>
-      </tr>
-      <tr>
-        <td id="L2691" class="blob-num js-line-number" data-line-number="2691"></td>
-        <td id="LC2691" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpca_many1</span>(<span class="pl-s3">mpc_parser_t</span> *a) { <span class="pl-k">return</span> <span class="pl-s3">mpc_many1</span>(mpcf_fold_ast, a); }</td>
-      </tr>
-      <tr>
-        <td id="L2692" class="blob-num js-line-number" data-line-number="2692"></td>
-        <td id="LC2692" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpca_count</span>(<span class="pl-st">int</span> n, <span class="pl-s3">mpc_parser_t</span> *a) { <span class="pl-k">return</span> <span class="pl-s3">mpc_count</span>(n, mpcf_fold_ast, a, (<span class="pl-s3">mpc_dtor_t</span>)mpc_ast_delete); }</td>
-      </tr>
-      <tr>
-        <td id="L2693" class="blob-num js-line-number" data-line-number="2693"></td>
-        <td id="LC2693" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2694" class="blob-num js-line-number" data-line-number="2694"></td>
-        <td id="LC2694" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpca_or</span>(<span class="pl-st">int</span> n, ...) {</td>
-      </tr>
-      <tr>
-        <td id="L2695" class="blob-num js-line-number" data-line-number="2695"></td>
-        <td id="LC2695" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2696" class="blob-num js-line-number" data-line-number="2696"></td>
-        <td id="LC2696" class="blob-code js-file-line">  <span class="pl-st">int</span> i;</td>
-      </tr>
-      <tr>
-        <td id="L2697" class="blob-num js-line-number" data-line-number="2697"></td>
-        <td id="LC2697" class="blob-code js-file-line">  <span class="pl-s3">va_list</span> va;</td>
-      </tr>
-      <tr>
-        <td id="L2698" class="blob-num js-line-number" data-line-number="2698"></td>
-        <td id="LC2698" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2699" class="blob-num js-line-number" data-line-number="2699"></td>
-        <td id="LC2699" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-s3">mpc_undefined</span>();</td>
-      </tr>
-      <tr>
-        <td id="L2700" class="blob-num js-line-number" data-line-number="2700"></td>
-        <td id="LC2700" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2701" class="blob-num js-line-number" data-line-number="2701"></td>
-        <td id="LC2701" class="blob-code js-file-line">  p-&gt;type = MPC_TYPE_OR;</td>
-      </tr>
-      <tr>
-        <td id="L2702" class="blob-num js-line-number" data-line-number="2702"></td>
-        <td id="LC2702" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">or</span>.<span class="pl-vo">n</span> = n;</td>
-      </tr>
-      <tr>
-        <td id="L2703" class="blob-num js-line-number" data-line-number="2703"></td>
-        <td id="LC2703" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">or</span>.<span class="pl-vo">xs</span> = <span class="pl-s3">malloc</span>(<span class="pl-k">sizeof</span>(<span class="pl-s3">mpc_parser_t</span>*) * n);</td>
-      </tr>
-      <tr>
-        <td id="L2704" class="blob-num js-line-number" data-line-number="2704"></td>
-        <td id="LC2704" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2705" class="blob-num js-line-number" data-line-number="2705"></td>
-        <td id="LC2705" class="blob-code js-file-line">  <span class="pl-s3">va_start</span>(va, n);  </td>
-      </tr>
-      <tr>
-        <td id="L2706" class="blob-num js-line-number" data-line-number="2706"></td>
-        <td id="LC2706" class="blob-code js-file-line">  <span class="pl-k">for</span> (i = <span class="pl-c1">0</span>; i &lt; n; i++) {</td>
-      </tr>
-      <tr>
-        <td id="L2707" class="blob-num js-line-number" data-line-number="2707"></td>
-        <td id="LC2707" class="blob-code js-file-line">    p-&gt;data.<span class="pl-vo">or</span>.<span class="pl-vo">xs</span>[i] = <span class="pl-s3">va_arg</span>(va, <span class="pl-s3">mpc_parser_t</span>*);</td>
-      </tr>
-      <tr>
-        <td id="L2708" class="blob-num js-line-number" data-line-number="2708"></td>
-        <td id="LC2708" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L2709" class="blob-num js-line-number" data-line-number="2709"></td>
-        <td id="LC2709" class="blob-code js-file-line">  <span class="pl-s3">va_end</span>(va);</td>
-      </tr>
-      <tr>
-        <td id="L2710" class="blob-num js-line-number" data-line-number="2710"></td>
-        <td id="LC2710" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2711" class="blob-num js-line-number" data-line-number="2711"></td>
-        <td id="LC2711" class="blob-code js-file-line">  <span class="pl-k">return</span> p;</td>
-      </tr>
-      <tr>
-        <td id="L2712" class="blob-num js-line-number" data-line-number="2712"></td>
-        <td id="LC2712" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2713" class="blob-num js-line-number" data-line-number="2713"></td>
-        <td id="LC2713" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2714" class="blob-num js-line-number" data-line-number="2714"></td>
-        <td id="LC2714" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2715" class="blob-num js-line-number" data-line-number="2715"></td>
-        <td id="LC2715" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpca_and</span>(<span class="pl-st">int</span> n, ...) {</td>
-      </tr>
-      <tr>
-        <td id="L2716" class="blob-num js-line-number" data-line-number="2716"></td>
-        <td id="LC2716" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2717" class="blob-num js-line-number" data-line-number="2717"></td>
-        <td id="LC2717" class="blob-code js-file-line">  <span class="pl-st">int</span> i;</td>
-      </tr>
-      <tr>
-        <td id="L2718" class="blob-num js-line-number" data-line-number="2718"></td>
-        <td id="LC2718" class="blob-code js-file-line">  <span class="pl-s3">va_list</span> va;</td>
-      </tr>
-      <tr>
-        <td id="L2719" class="blob-num js-line-number" data-line-number="2719"></td>
-        <td id="LC2719" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2720" class="blob-num js-line-number" data-line-number="2720"></td>
-        <td id="LC2720" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-s3">mpc_undefined</span>();</td>
-      </tr>
-      <tr>
-        <td id="L2721" class="blob-num js-line-number" data-line-number="2721"></td>
-        <td id="LC2721" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2722" class="blob-num js-line-number" data-line-number="2722"></td>
-        <td id="LC2722" class="blob-code js-file-line">  p-&gt;type = MPC_TYPE_AND;</td>
-      </tr>
-      <tr>
-        <td id="L2723" class="blob-num js-line-number" data-line-number="2723"></td>
-        <td id="LC2723" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">and</span>.<span class="pl-vo">n</span> = n;</td>
-      </tr>
-      <tr>
-        <td id="L2724" class="blob-num js-line-number" data-line-number="2724"></td>
-        <td id="LC2724" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">and</span>.<span class="pl-vo">f</span> = mpcf_fold_ast;</td>
-      </tr>
-      <tr>
-        <td id="L2725" class="blob-num js-line-number" data-line-number="2725"></td>
-        <td id="LC2725" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">and</span>.<span class="pl-vo">xs</span> = <span class="pl-s3">malloc</span>(<span class="pl-k">sizeof</span>(<span class="pl-s3">mpc_parser_t</span>*) * n);</td>
-      </tr>
-      <tr>
-        <td id="L2726" class="blob-num js-line-number" data-line-number="2726"></td>
-        <td id="LC2726" class="blob-code js-file-line">  p-&gt;data.<span class="pl-vo">and</span>.<span class="pl-vo">dxs</span> = <span class="pl-s3">malloc</span>(<span class="pl-k">sizeof</span>(<span class="pl-s3">mpc_dtor_t</span>) * (n-<span class="pl-c1">1</span>));</td>
-      </tr>
-      <tr>
-        <td id="L2727" class="blob-num js-line-number" data-line-number="2727"></td>
-        <td id="LC2727" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2728" class="blob-num js-line-number" data-line-number="2728"></td>
-        <td id="LC2728" class="blob-code js-file-line">  <span class="pl-s3">va_start</span>(va, n);</td>
-      </tr>
-      <tr>
-        <td id="L2729" class="blob-num js-line-number" data-line-number="2729"></td>
-        <td id="LC2729" class="blob-code js-file-line">  <span class="pl-k">for</span> (i = <span class="pl-c1">0</span>; i &lt; n; i++) {</td>
-      </tr>
-      <tr>
-        <td id="L2730" class="blob-num js-line-number" data-line-number="2730"></td>
-        <td id="LC2730" class="blob-code js-file-line">    p-&gt;data.<span class="pl-vo">and</span>.<span class="pl-vo">xs</span>[i] = <span class="pl-s3">va_arg</span>(va, <span class="pl-s3">mpc_parser_t</span>*);</td>
-      </tr>
-      <tr>
-        <td id="L2731" class="blob-num js-line-number" data-line-number="2731"></td>
-        <td id="LC2731" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L2732" class="blob-num js-line-number" data-line-number="2732"></td>
-        <td id="LC2732" class="blob-code js-file-line">  <span class="pl-k">for</span> (i = <span class="pl-c1">0</span>; i &lt; (n-<span class="pl-c1">1</span>); i++) {</td>
-      </tr>
-      <tr>
-        <td id="L2733" class="blob-num js-line-number" data-line-number="2733"></td>
-        <td id="LC2733" class="blob-code js-file-line">    p-&gt;data.<span class="pl-vo">and</span>.<span class="pl-vo">dxs</span>[i] = (<span class="pl-s3">mpc_dtor_t</span>)mpc_ast_delete;</td>
-      </tr>
-      <tr>
-        <td id="L2734" class="blob-num js-line-number" data-line-number="2734"></td>
-        <td id="LC2734" class="blob-code js-file-line">  }    </td>
-      </tr>
-      <tr>
-        <td id="L2735" class="blob-num js-line-number" data-line-number="2735"></td>
-        <td id="LC2735" class="blob-code js-file-line">  <span class="pl-s3">va_end</span>(va);</td>
-      </tr>
-      <tr>
-        <td id="L2736" class="blob-num js-line-number" data-line-number="2736"></td>
-        <td id="LC2736" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2737" class="blob-num js-line-number" data-line-number="2737"></td>
-        <td id="LC2737" class="blob-code js-file-line">  <span class="pl-k">return</span> p;  </td>
-      </tr>
-      <tr>
-        <td id="L2738" class="blob-num js-line-number" data-line-number="2738"></td>
-        <td id="LC2738" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2739" class="blob-num js-line-number" data-line-number="2739"></td>
-        <td id="LC2739" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2740" class="blob-num js-line-number" data-line-number="2740"></td>
-        <td id="LC2740" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpca_total</span>(<span class="pl-s3">mpc_parser_t</span> *a) { <span class="pl-k">return</span> <span class="pl-s3">mpc_total</span>(a, (<span class="pl-s3">mpc_dtor_t</span>)mpc_ast_delete); }</td>
-      </tr>
-      <tr>
-        <td id="L2741" class="blob-num js-line-number" data-line-number="2741"></td>
-        <td id="LC2741" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2742" class="blob-num js-line-number" data-line-number="2742"></td>
-        <td id="LC2742" class="blob-code js-file-line"><span class="pl-c">/*</span></td>
-      </tr>
-      <tr>
-        <td id="L2743" class="blob-num js-line-number" data-line-number="2743"></td>
-        <td id="LC2743" class="blob-code js-file-line"><span class="pl-c">** Grammar Parser</span></td>
-      </tr>
-      <tr>
-        <td id="L2744" class="blob-num js-line-number" data-line-number="2744"></td>
-        <td id="LC2744" class="blob-code js-file-line"><span class="pl-c">*/</span></td>
-      </tr>
-      <tr>
-        <td id="L2745" class="blob-num js-line-number" data-line-number="2745"></td>
-        <td id="LC2745" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2746" class="blob-num js-line-number" data-line-number="2746"></td>
-        <td id="LC2746" class="blob-code js-file-line"><span class="pl-c">/*</span></td>
-      </tr>
-      <tr>
-        <td id="L2747" class="blob-num js-line-number" data-line-number="2747"></td>
-        <td id="LC2747" class="blob-code js-file-line"><span class="pl-c">** This is another interesting bootstrapping.</span></td>
-      </tr>
-      <tr>
-        <td id="L2748" class="blob-num js-line-number" data-line-number="2748"></td>
-        <td id="LC2748" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L2749" class="blob-num js-line-number" data-line-number="2749"></td>
-        <td id="LC2749" class="blob-code js-file-line"><span class="pl-c">** Having a general purpose AST type allows</span></td>
-      </tr>
-      <tr>
-        <td id="L2750" class="blob-num js-line-number" data-line-number="2750"></td>
-        <td id="LC2750" class="blob-code js-file-line"><span class="pl-c">** users to specify the grammar alone and</span></td>
-      </tr>
-      <tr>
-        <td id="L2751" class="blob-num js-line-number" data-line-number="2751"></td>
-        <td id="LC2751" class="blob-code js-file-line"><span class="pl-c">** let all fold rules be automatically taken</span></td>
-      </tr>
-      <tr>
-        <td id="L2752" class="blob-num js-line-number" data-line-number="2752"></td>
-        <td id="LC2752" class="blob-code js-file-line"><span class="pl-c">** care of by existing functions.</span></td>
-      </tr>
-      <tr>
-        <td id="L2753" class="blob-num js-line-number" data-line-number="2753"></td>
-        <td id="LC2753" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L2754" class="blob-num js-line-number" data-line-number="2754"></td>
-        <td id="LC2754" class="blob-code js-file-line"><span class="pl-c">** You don&#39;t get to control the type spat</span></td>
-      </tr>
-      <tr>
-        <td id="L2755" class="blob-num js-line-number" data-line-number="2755"></td>
-        <td id="LC2755" class="blob-code js-file-line"><span class="pl-c">** out but this means you can make a nice</span></td>
-      </tr>
-      <tr>
-        <td id="L2756" class="blob-num js-line-number" data-line-number="2756"></td>
-        <td id="LC2756" class="blob-code js-file-line"><span class="pl-c">** parser to take in some grammar in nice</span></td>
-      </tr>
-      <tr>
-        <td id="L2757" class="blob-num js-line-number" data-line-number="2757"></td>
-        <td id="LC2757" class="blob-code js-file-line"><span class="pl-c">** syntax and spit out a parser that works.</span></td>
-      </tr>
-      <tr>
-        <td id="L2758" class="blob-num js-line-number" data-line-number="2758"></td>
-        <td id="LC2758" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L2759" class="blob-num js-line-number" data-line-number="2759"></td>
-        <td id="LC2759" class="blob-code js-file-line"><span class="pl-c">** The grammar for this looks surprisingly</span></td>
-      </tr>
-      <tr>
-        <td id="L2760" class="blob-num js-line-number" data-line-number="2760"></td>
-        <td id="LC2760" class="blob-code js-file-line"><span class="pl-c">** like regex but the main difference is that</span></td>
-      </tr>
-      <tr>
-        <td id="L2761" class="blob-num js-line-number" data-line-number="2761"></td>
-        <td id="LC2761" class="blob-code js-file-line"><span class="pl-c">** it is now whitespace insensitive and the</span></td>
-      </tr>
-      <tr>
-        <td id="L2762" class="blob-num js-line-number" data-line-number="2762"></td>
-        <td id="LC2762" class="blob-code js-file-line"><span class="pl-c">** base type takes literals of some form.</span></td>
-      </tr>
-      <tr>
-        <td id="L2763" class="blob-num js-line-number" data-line-number="2763"></td>
-        <td id="LC2763" class="blob-code js-file-line"><span class="pl-c">*/</span></td>
-      </tr>
-      <tr>
-        <td id="L2764" class="blob-num js-line-number" data-line-number="2764"></td>
-        <td id="LC2764" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2765" class="blob-num js-line-number" data-line-number="2765"></td>
-        <td id="LC2765" class="blob-code js-file-line"><span class="pl-c">/*</span></td>
-      </tr>
-      <tr>
-        <td id="L2766" class="blob-num js-line-number" data-line-number="2766"></td>
-        <td id="LC2766" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L2767" class="blob-num js-line-number" data-line-number="2767"></td>
-        <td id="LC2767" class="blob-code js-file-line"><span class="pl-c">**  ### Grammar Grammar</span></td>
-      </tr>
-      <tr>
-        <td id="L2768" class="blob-num js-line-number" data-line-number="2768"></td>
-        <td id="LC2768" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L2769" class="blob-num js-line-number" data-line-number="2769"></td>
-        <td id="LC2769" class="blob-code js-file-line"><span class="pl-c">**      &lt;grammar&gt; : (&lt;term&gt; &quot;|&quot; &lt;grammar&gt;) | &lt;term&gt;</span></td>
-      </tr>
-      <tr>
-        <td id="L2770" class="blob-num js-line-number" data-line-number="2770"></td>
-        <td id="LC2770" class="blob-code js-file-line"><span class="pl-c">**     </span></td>
-      </tr>
-      <tr>
-        <td id="L2771" class="blob-num js-line-number" data-line-number="2771"></td>
-        <td id="LC2771" class="blob-code js-file-line"><span class="pl-c">**      &lt;term&gt; : &lt;factor&gt;*</span></td>
-      </tr>
-      <tr>
-        <td id="L2772" class="blob-num js-line-number" data-line-number="2772"></td>
-        <td id="LC2772" class="blob-code js-file-line"><span class="pl-c">**</span></td>
-      </tr>
-      <tr>
-        <td id="L2773" class="blob-num js-line-number" data-line-number="2773"></td>
-        <td id="LC2773" class="blob-code js-file-line"><span class="pl-c">**      &lt;factor&gt; : &lt;base&gt;</span></td>
-      </tr>
-      <tr>
-        <td id="L2774" class="blob-num js-line-number" data-line-number="2774"></td>
-        <td id="LC2774" class="blob-code js-file-line"><span class="pl-c">**               | &lt;base&gt; &quot;*&quot;</span></td>
-      </tr>
-      <tr>
-        <td id="L2775" class="blob-num js-line-number" data-line-number="2775"></td>
-        <td id="LC2775" class="blob-code js-file-line"><span class="pl-c">**               | &lt;base&gt; &quot;+&quot;</span></td>
-      </tr>
-      <tr>
-        <td id="L2776" class="blob-num js-line-number" data-line-number="2776"></td>
-        <td id="LC2776" class="blob-code js-file-line"><span class="pl-c">**               | &lt;base&gt; &quot;?&quot;</span></td>
-      </tr>
-      <tr>
-        <td id="L2777" class="blob-num js-line-number" data-line-number="2777"></td>
-        <td id="LC2777" class="blob-code js-file-line"><span class="pl-c">**               | &lt;base&gt; &quot;{&quot; &lt;digits&gt; &quot;}&quot;</span></td>
-      </tr>
-      <tr>
-        <td id="L2778" class="blob-num js-line-number" data-line-number="2778"></td>
-        <td id="LC2778" class="blob-code js-file-line"><span class="pl-c">**           </span></td>
-      </tr>
-      <tr>
-        <td id="L2779" class="blob-num js-line-number" data-line-number="2779"></td>
-        <td id="LC2779" class="blob-code js-file-line"><span class="pl-c">**      &lt;base&gt; : &quot;&lt;&quot; (&lt;digits&gt; | &lt;ident&gt;) &quot;&gt;&quot;</span></td>
-      </tr>
-      <tr>
-        <td id="L2780" class="blob-num js-line-number" data-line-number="2780"></td>
-        <td id="LC2780" class="blob-code js-file-line"><span class="pl-c">**             | &lt;string_lit&gt;</span></td>
-      </tr>
-      <tr>
-        <td id="L2781" class="blob-num js-line-number" data-line-number="2781"></td>
-        <td id="LC2781" class="blob-code js-file-line"><span class="pl-c">**             | &lt;char_lit&gt;</span></td>
-      </tr>
-      <tr>
-        <td id="L2782" class="blob-num js-line-number" data-line-number="2782"></td>
-        <td id="LC2782" class="blob-code js-file-line"><span class="pl-c">**             | &lt;regex_lit&gt;</span></td>
-      </tr>
-      <tr>
-        <td id="L2783" class="blob-num js-line-number" data-line-number="2783"></td>
-        <td id="LC2783" class="blob-code js-file-line"><span class="pl-c">**             | &quot;(&quot; &lt;grammar&gt; &quot;)&quot;</span></td>
-      </tr>
-      <tr>
-        <td id="L2784" class="blob-num js-line-number" data-line-number="2784"></td>
-        <td id="LC2784" class="blob-code js-file-line"><span class="pl-c">*/</span></td>
-      </tr>
-      <tr>
-        <td id="L2785" class="blob-num js-line-number" data-line-number="2785"></td>
-        <td id="LC2785" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2786" class="blob-num js-line-number" data-line-number="2786"></td>
-        <td id="LC2786" class="blob-code js-file-line"><span class="pl-st">typedef</span> <span class="pl-st">struct</span> {</td>
-      </tr>
-      <tr>
-        <td id="L2787" class="blob-num js-line-number" data-line-number="2787"></td>
-        <td id="LC2787" class="blob-code js-file-line">  <span class="pl-s3">va_list</span> *va;</td>
-      </tr>
-      <tr>
-        <td id="L2788" class="blob-num js-line-number" data-line-number="2788"></td>
-        <td id="LC2788" class="blob-code js-file-line">  <span class="pl-st">int</span> parsers_num;</td>
-      </tr>
-      <tr>
-        <td id="L2789" class="blob-num js-line-number" data-line-number="2789"></td>
-        <td id="LC2789" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> **parsers;</td>
-      </tr>
-      <tr>
-        <td id="L2790" class="blob-num js-line-number" data-line-number="2790"></td>
-        <td id="LC2790" class="blob-code js-file-line">  <span class="pl-st">int</span> flags;</td>
-      </tr>
-      <tr>
-        <td id="L2791" class="blob-num js-line-number" data-line-number="2791"></td>
-        <td id="LC2791" class="blob-code js-file-line">} <span class="pl-s3">mpca_grammar_st_t</span>;</td>
-      </tr>
-      <tr>
-        <td id="L2792" class="blob-num js-line-number" data-line-number="2792"></td>
-        <td id="LC2792" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2793" class="blob-num js-line-number" data-line-number="2793"></td>
-        <td id="LC2793" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcaf_grammar_or</span>(<span class="pl-st">int</span> n, <span class="pl-s3">mpc_val_t</span> **xs) {</td>
-      </tr>
-      <tr>
-        <td id="L2794" class="blob-num js-line-number" data-line-number="2794"></td>
-        <td id="LC2794" class="blob-code js-file-line">  (<span class="pl-st">void</span>) n;</td>
-      </tr>
-      <tr>
-        <td id="L2795" class="blob-num js-line-number" data-line-number="2795"></td>
-        <td id="LC2795" class="blob-code js-file-line">  <span class="pl-k">if</span> (xs[<span class="pl-c1">1</span>] == <span class="pl-c1">NULL</span>) { <span class="pl-k">return</span> xs[<span class="pl-c1">0</span>]; }</td>
-      </tr>
-      <tr>
-        <td id="L2796" class="blob-num js-line-number" data-line-number="2796"></td>
-        <td id="LC2796" class="blob-code js-file-line">  <span class="pl-k">else</span> { <span class="pl-k">return</span> <span class="pl-s3">mpca_or</span>(<span class="pl-c1">2</span>, xs[<span class="pl-c1">0</span>], xs[<span class="pl-c1">1</span>]); }</td>
-      </tr>
-      <tr>
-        <td id="L2797" class="blob-num js-line-number" data-line-number="2797"></td>
-        <td id="LC2797" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2798" class="blob-num js-line-number" data-line-number="2798"></td>
-        <td id="LC2798" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2799" class="blob-num js-line-number" data-line-number="2799"></td>
-        <td id="LC2799" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcaf_grammar_and</span>(<span class="pl-st">int</span> n, <span class="pl-s3">mpc_val_t</span> **xs) {</td>
-      </tr>
-      <tr>
-        <td id="L2800" class="blob-num js-line-number" data-line-number="2800"></td>
-        <td id="LC2800" class="blob-code js-file-line">  <span class="pl-st">int</span> i;</td>
-      </tr>
-      <tr>
-        <td id="L2801" class="blob-num js-line-number" data-line-number="2801"></td>
-        <td id="LC2801" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-s3">mpc_pass</span>();  </td>
-      </tr>
-      <tr>
-        <td id="L2802" class="blob-num js-line-number" data-line-number="2802"></td>
-        <td id="LC2802" class="blob-code js-file-line">  <span class="pl-k">for</span> (i = <span class="pl-c1">0</span>; i &lt; n; i++) {</td>
-      </tr>
-      <tr>
-        <td id="L2803" class="blob-num js-line-number" data-line-number="2803"></td>
-        <td id="LC2803" class="blob-code js-file-line">    <span class="pl-k">if</span> (xs[i] != <span class="pl-c1">NULL</span>) { p = <span class="pl-s3">mpca_and</span>(<span class="pl-c1">2</span>, p, xs[i]); }</td>
-      </tr>
-      <tr>
-        <td id="L2804" class="blob-num js-line-number" data-line-number="2804"></td>
-        <td id="LC2804" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L2805" class="blob-num js-line-number" data-line-number="2805"></td>
-        <td id="LC2805" class="blob-code js-file-line">  <span class="pl-k">return</span> p;</td>
-      </tr>
-      <tr>
-        <td id="L2806" class="blob-num js-line-number" data-line-number="2806"></td>
-        <td id="LC2806" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2807" class="blob-num js-line-number" data-line-number="2807"></td>
-        <td id="LC2807" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2808" class="blob-num js-line-number" data-line-number="2808"></td>
-        <td id="LC2808" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcaf_grammar_repeat</span>(<span class="pl-st">int</span> n, <span class="pl-s3">mpc_val_t</span> **xs) { </td>
-      </tr>
-      <tr>
-        <td id="L2809" class="blob-num js-line-number" data-line-number="2809"></td>
-        <td id="LC2809" class="blob-code js-file-line">  <span class="pl-st">int</span> num;</td>
-      </tr>
-      <tr>
-        <td id="L2810" class="blob-num js-line-number" data-line-number="2810"></td>
-        <td id="LC2810" class="blob-code js-file-line">  (<span class="pl-st">void</span>) n;</td>
-      </tr>
-      <tr>
-        <td id="L2811" class="blob-num js-line-number" data-line-number="2811"></td>
-        <td id="LC2811" class="blob-code js-file-line">  <span class="pl-k">if</span> (xs[<span class="pl-c1">1</span>] == <span class="pl-c1">NULL</span>) { <span class="pl-k">return</span> xs[<span class="pl-c1">0</span>]; }  </td>
-      </tr>
-      <tr>
-        <td id="L2812" class="blob-num js-line-number" data-line-number="2812"></td>
-        <td id="LC2812" class="blob-code js-file-line">  <span class="pl-k">if</span> (<span class="pl-s3">strcmp</span>(xs[<span class="pl-c1">1</span>], <span class="pl-s1"><span class="pl-pds">&quot;</span>*<span class="pl-pds">&quot;</span></span>) == <span class="pl-c1">0</span>) { <span class="pl-s3">free</span>(xs[<span class="pl-c1">1</span>]); <span class="pl-k">return</span> <span class="pl-s3">mpca_many</span>(xs[<span class="pl-c1">0</span>]); }</td>
-      </tr>
-      <tr>
-        <td id="L2813" class="blob-num js-line-number" data-line-number="2813"></td>
-        <td id="LC2813" class="blob-code js-file-line">  <span class="pl-k">if</span> (<span class="pl-s3">strcmp</span>(xs[<span class="pl-c1">1</span>], <span class="pl-s1"><span class="pl-pds">&quot;</span>+<span class="pl-pds">&quot;</span></span>) == <span class="pl-c1">0</span>) { <span class="pl-s3">free</span>(xs[<span class="pl-c1">1</span>]); <span class="pl-k">return</span> <span class="pl-s3">mpca_many1</span>(xs[<span class="pl-c1">0</span>]); }</td>
-      </tr>
-      <tr>
-        <td id="L2814" class="blob-num js-line-number" data-line-number="2814"></td>
-        <td id="LC2814" class="blob-code js-file-line">  <span class="pl-k">if</span> (<span class="pl-s3">strcmp</span>(xs[<span class="pl-c1">1</span>], <span class="pl-s1"><span class="pl-pds">&quot;</span>?<span class="pl-pds">&quot;</span></span>) == <span class="pl-c1">0</span>) { <span class="pl-s3">free</span>(xs[<span class="pl-c1">1</span>]); <span class="pl-k">return</span> <span class="pl-s3">mpca_maybe</span>(xs[<span class="pl-c1">0</span>]); }</td>
-      </tr>
-      <tr>
-        <td id="L2815" class="blob-num js-line-number" data-line-number="2815"></td>
-        <td id="LC2815" class="blob-code js-file-line">  <span class="pl-k">if</span> (<span class="pl-s3">strcmp</span>(xs[<span class="pl-c1">1</span>], <span class="pl-s1"><span class="pl-pds">&quot;</span>!<span class="pl-pds">&quot;</span></span>) == <span class="pl-c1">0</span>) { <span class="pl-s3">free</span>(xs[<span class="pl-c1">1</span>]); <span class="pl-k">return</span> <span class="pl-s3">mpca_not</span>(xs[<span class="pl-c1">0</span>]); }</td>
-      </tr>
-      <tr>
-        <td id="L2816" class="blob-num js-line-number" data-line-number="2816"></td>
-        <td id="LC2816" class="blob-code js-file-line">  num = *((<span class="pl-st">int</span>*)xs[<span class="pl-c1">1</span>]);</td>
-      </tr>
-      <tr>
-        <td id="L2817" class="blob-num js-line-number" data-line-number="2817"></td>
-        <td id="LC2817" class="blob-code js-file-line">  <span class="pl-s3">free</span>(xs[<span class="pl-c1">1</span>]);</td>
-      </tr>
-      <tr>
-        <td id="L2818" class="blob-num js-line-number" data-line-number="2818"></td>
-        <td id="LC2818" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">mpca_count</span>(num, xs[<span class="pl-c1">0</span>]);</td>
-      </tr>
-      <tr>
-        <td id="L2819" class="blob-num js-line-number" data-line-number="2819"></td>
-        <td id="LC2819" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2820" class="blob-num js-line-number" data-line-number="2820"></td>
-        <td id="LC2820" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2821" class="blob-num js-line-number" data-line-number="2821"></td>
-        <td id="LC2821" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcaf_grammar_string</span>(<span class="pl-s3">mpc_val_t</span> *x, <span class="pl-st">void</span> *s) {</td>
-      </tr>
-      <tr>
-        <td id="L2822" class="blob-num js-line-number" data-line-number="2822"></td>
-        <td id="LC2822" class="blob-code js-file-line">  <span class="pl-s3">mpca_grammar_st_t</span> *st = s;</td>
-      </tr>
-      <tr>
-        <td id="L2823" class="blob-num js-line-number" data-line-number="2823"></td>
-        <td id="LC2823" class="blob-code js-file-line">  <span class="pl-st">char</span> *y = <span class="pl-s3">mpcf_unescape</span>(x);</td>
-      </tr>
-      <tr>
-        <td id="L2824" class="blob-num js-line-number" data-line-number="2824"></td>
-        <td id="LC2824" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = (st-&gt;flags &amp; MPCA_LANG_WHITESPACE_SENSITIVE) ? <span class="pl-s3">mpc_string</span>(y) : <span class="pl-s3">mpc_tok</span>(<span class="pl-s3">mpc_string</span>(y));</td>
-      </tr>
-      <tr>
-        <td id="L2825" class="blob-num js-line-number" data-line-number="2825"></td>
-        <td id="LC2825" class="blob-code js-file-line">  <span class="pl-s3">free</span>(y);</td>
-      </tr>
-      <tr>
-        <td id="L2826" class="blob-num js-line-number" data-line-number="2826"></td>
-        <td id="LC2826" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">mpca_state</span>(<span class="pl-s3">mpca_tag</span>(<span class="pl-s3">mpc_apply</span>(p, mpcf_str_ast), <span class="pl-s1"><span class="pl-pds">&quot;</span>string<span class="pl-pds">&quot;</span></span>));</td>
-      </tr>
-      <tr>
-        <td id="L2827" class="blob-num js-line-number" data-line-number="2827"></td>
-        <td id="LC2827" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2828" class="blob-num js-line-number" data-line-number="2828"></td>
-        <td id="LC2828" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2829" class="blob-num js-line-number" data-line-number="2829"></td>
-        <td id="LC2829" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcaf_grammar_char</span>(<span class="pl-s3">mpc_val_t</span> *x, <span class="pl-st">void</span> *s) {</td>
-      </tr>
-      <tr>
-        <td id="L2830" class="blob-num js-line-number" data-line-number="2830"></td>
-        <td id="LC2830" class="blob-code js-file-line">  <span class="pl-s3">mpca_grammar_st_t</span> *st = s;</td>
-      </tr>
-      <tr>
-        <td id="L2831" class="blob-num js-line-number" data-line-number="2831"></td>
-        <td id="LC2831" class="blob-code js-file-line">  <span class="pl-st">char</span> *y = <span class="pl-s3">mpcf_unescape</span>(x);</td>
-      </tr>
-      <tr>
-        <td id="L2832" class="blob-num js-line-number" data-line-number="2832"></td>
-        <td id="LC2832" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = (st-&gt;flags &amp; MPCA_LANG_WHITESPACE_SENSITIVE) ? <span class="pl-s3">mpc_char</span>(y[<span class="pl-c1">0</span>]) : <span class="pl-s3">mpc_tok</span>(<span class="pl-s3">mpc_char</span>(y[<span class="pl-c1">0</span>]));</td>
-      </tr>
-      <tr>
-        <td id="L2833" class="blob-num js-line-number" data-line-number="2833"></td>
-        <td id="LC2833" class="blob-code js-file-line">  <span class="pl-s3">free</span>(y);</td>
-      </tr>
-      <tr>
-        <td id="L2834" class="blob-num js-line-number" data-line-number="2834"></td>
-        <td id="LC2834" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">mpca_state</span>(<span class="pl-s3">mpca_tag</span>(<span class="pl-s3">mpc_apply</span>(p, mpcf_str_ast), <span class="pl-s1"><span class="pl-pds">&quot;</span>char<span class="pl-pds">&quot;</span></span>));</td>
-      </tr>
-      <tr>
-        <td id="L2835" class="blob-num js-line-number" data-line-number="2835"></td>
-        <td id="LC2835" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2836" class="blob-num js-line-number" data-line-number="2836"></td>
-        <td id="LC2836" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2837" class="blob-num js-line-number" data-line-number="2837"></td>
-        <td id="LC2837" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcaf_grammar_regex</span>(<span class="pl-s3">mpc_val_t</span> *x, <span class="pl-st">void</span> *s) {</td>
-      </tr>
-      <tr>
-        <td id="L2838" class="blob-num js-line-number" data-line-number="2838"></td>
-        <td id="LC2838" class="blob-code js-file-line">  <span class="pl-s3">mpca_grammar_st_t</span> *st = s;</td>
-      </tr>
-      <tr>
-        <td id="L2839" class="blob-num js-line-number" data-line-number="2839"></td>
-        <td id="LC2839" class="blob-code js-file-line">  <span class="pl-st">char</span> *y = <span class="pl-s3">mpcf_unescape_regex</span>(x);</td>
-      </tr>
-      <tr>
-        <td id="L2840" class="blob-num js-line-number" data-line-number="2840"></td>
-        <td id="LC2840" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = (st-&gt;flags &amp; MPCA_LANG_WHITESPACE_SENSITIVE) ? <span class="pl-s3">mpc_re</span>(y) : <span class="pl-s3">mpc_tok</span>(<span class="pl-s3">mpc_re</span>(y));</td>
-      </tr>
-      <tr>
-        <td id="L2841" class="blob-num js-line-number" data-line-number="2841"></td>
-        <td id="LC2841" class="blob-code js-file-line">  <span class="pl-s3">free</span>(y);</td>
-      </tr>
-      <tr>
-        <td id="L2842" class="blob-num js-line-number" data-line-number="2842"></td>
-        <td id="LC2842" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-s3">mpca_state</span>(<span class="pl-s3">mpca_tag</span>(<span class="pl-s3">mpc_apply</span>(p, mpcf_str_ast), <span class="pl-s1"><span class="pl-pds">&quot;</span>regex<span class="pl-pds">&quot;</span></span>));</td>
-      </tr>
-      <tr>
-        <td id="L2843" class="blob-num js-line-number" data-line-number="2843"></td>
-        <td id="LC2843" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2844" class="blob-num js-line-number" data-line-number="2844"></td>
-        <td id="LC2844" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2845" class="blob-num js-line-number" data-line-number="2845"></td>
-        <td id="LC2845" class="blob-code js-file-line"><span class="pl-c">/* Should this just use `isdigit` instead? */</span></td>
-      </tr>
-      <tr>
-        <td id="L2846" class="blob-num js-line-number" data-line-number="2846"></td>
-        <td id="LC2846" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">int</span> <span class="pl-en">is_number</span>(<span class="pl-s">const</span> <span class="pl-st">char</span>* s) {</td>
-      </tr>
-      <tr>
-        <td id="L2847" class="blob-num js-line-number" data-line-number="2847"></td>
-        <td id="LC2847" class="blob-code js-file-line">  <span class="pl-s3">size_t</span> i;</td>
-      </tr>
-      <tr>
-        <td id="L2848" class="blob-num js-line-number" data-line-number="2848"></td>
-        <td id="LC2848" class="blob-code js-file-line">  <span class="pl-k">for</span> (i = <span class="pl-c1">0</span>; i &lt; <span class="pl-s3">strlen</span>(s); i++) { <span class="pl-k">if</span> (!<span class="pl-s3">strchr</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>0123456789<span class="pl-pds">&quot;</span></span>, s[i])) { <span class="pl-k">return</span> <span class="pl-c1">0</span>; } }</td>
-      </tr>
-      <tr>
-        <td id="L2849" class="blob-num js-line-number" data-line-number="2849"></td>
-        <td id="LC2849" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-c1">1</span>;</td>
-      </tr>
-      <tr>
-        <td id="L2850" class="blob-num js-line-number" data-line-number="2850"></td>
-        <td id="LC2850" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2851" class="blob-num js-line-number" data-line-number="2851"></td>
-        <td id="LC2851" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2852" class="blob-num js-line-number" data-line-number="2852"></td>
-        <td id="LC2852" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpca_grammar_find_parser</span>(<span class="pl-st">char</span> *x, <span class="pl-s3">mpca_grammar_st_t</span> *st) {</td>
-      </tr>
-      <tr>
-        <td id="L2853" class="blob-num js-line-number" data-line-number="2853"></td>
-        <td id="LC2853" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2854" class="blob-num js-line-number" data-line-number="2854"></td>
-        <td id="LC2854" class="blob-code js-file-line">  <span class="pl-st">int</span> i;</td>
-      </tr>
-      <tr>
-        <td id="L2855" class="blob-num js-line-number" data-line-number="2855"></td>
-        <td id="LC2855" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p;</td>
-      </tr>
-      <tr>
-        <td id="L2856" class="blob-num js-line-number" data-line-number="2856"></td>
-        <td id="LC2856" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2857" class="blob-num js-line-number" data-line-number="2857"></td>
-        <td id="LC2857" class="blob-code js-file-line">  <span class="pl-c">/* Case of Number */</span></td>
-      </tr>
-      <tr>
-        <td id="L2858" class="blob-num js-line-number" data-line-number="2858"></td>
-        <td id="LC2858" class="blob-code js-file-line">  <span class="pl-k">if</span> (<span class="pl-s3">is_number</span>(x)) {</td>
-      </tr>
-      <tr>
-        <td id="L2859" class="blob-num js-line-number" data-line-number="2859"></td>
-        <td id="LC2859" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2860" class="blob-num js-line-number" data-line-number="2860"></td>
-        <td id="LC2860" class="blob-code js-file-line">    i = <span class="pl-s3">strtol</span>(x, <span class="pl-c1">NULL</span>, <span class="pl-c1">10</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2861" class="blob-num js-line-number" data-line-number="2861"></td>
-        <td id="LC2861" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L2862" class="blob-num js-line-number" data-line-number="2862"></td>
-        <td id="LC2862" class="blob-code js-file-line">    <span class="pl-k">while</span> (st-&gt;parsers_num &lt;= i) {</td>
-      </tr>
-      <tr>
-        <td id="L2863" class="blob-num js-line-number" data-line-number="2863"></td>
-        <td id="LC2863" class="blob-code js-file-line">      st-&gt;parsers_num++;</td>
-      </tr>
-      <tr>
-        <td id="L2864" class="blob-num js-line-number" data-line-number="2864"></td>
-        <td id="LC2864" class="blob-code js-file-line">      st-&gt;parsers = <span class="pl-s3">realloc</span>(st-&gt;parsers, <span class="pl-k">sizeof</span>(<span class="pl-s3">mpc_parser_t</span>*) * st-&gt;parsers_num);</td>
-      </tr>
-      <tr>
-        <td id="L2865" class="blob-num js-line-number" data-line-number="2865"></td>
-        <td id="LC2865" class="blob-code js-file-line">      st-&gt;parsers[st-&gt;parsers_num-<span class="pl-c1">1</span>] = <span class="pl-s3">va_arg</span>(*st-&gt;va, <span class="pl-s3">mpc_parser_t</span>*);</td>
-      </tr>
-      <tr>
-        <td id="L2866" class="blob-num js-line-number" data-line-number="2866"></td>
-        <td id="LC2866" class="blob-code js-file-line">      <span class="pl-k">if</span> (st-&gt;parsers[st-&gt;parsers_num-<span class="pl-c1">1</span>] == <span class="pl-c1">NULL</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L2867" class="blob-num js-line-number" data-line-number="2867"></td>
-        <td id="LC2867" class="blob-code js-file-line">        <span class="pl-k">return</span> <span class="pl-s3">mpc_failf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>No Parser in position <span class="pl-c1">%i</span>! Only supplied <span class="pl-c1">%i</span> Parsers!<span class="pl-pds">&quot;</span></span>, i, st-&gt;parsers_num);</td>
-      </tr>
-      <tr>
-        <td id="L2868" class="blob-num js-line-number" data-line-number="2868"></td>
-        <td id="LC2868" class="blob-code js-file-line">      }</td>
-      </tr>
-      <tr>
-        <td id="L2869" class="blob-num js-line-number" data-line-number="2869"></td>
-        <td id="LC2869" class="blob-code js-file-line">    }</td>
-      </tr>
-      <tr>
-        <td id="L2870" class="blob-num js-line-number" data-line-number="2870"></td>
-        <td id="LC2870" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L2871" class="blob-num js-line-number" data-line-number="2871"></td>
-        <td id="LC2871" class="blob-code js-file-line">    <span class="pl-k">return</span> st-&gt;parsers[st-&gt;parsers_num-<span class="pl-c1">1</span>];</td>
-      </tr>
-      <tr>
-        <td id="L2872" class="blob-num js-line-number" data-line-number="2872"></td>
-        <td id="LC2872" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2873" class="blob-num js-line-number" data-line-number="2873"></td>
-        <td id="LC2873" class="blob-code js-file-line">  <span class="pl-c">/* Case of Identifier */</span></td>
-      </tr>
-      <tr>
-        <td id="L2874" class="blob-num js-line-number" data-line-number="2874"></td>
-        <td id="LC2874" class="blob-code js-file-line">  } <span class="pl-k">else</span> {</td>
-      </tr>
-      <tr>
-        <td id="L2875" class="blob-num js-line-number" data-line-number="2875"></td>
-        <td id="LC2875" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L2876" class="blob-num js-line-number" data-line-number="2876"></td>
-        <td id="LC2876" class="blob-code js-file-line">    <span class="pl-c">/* Search Existing Parsers */</span></td>
-      </tr>
-      <tr>
-        <td id="L2877" class="blob-num js-line-number" data-line-number="2877"></td>
-        <td id="LC2877" class="blob-code js-file-line">    <span class="pl-k">for</span> (i = <span class="pl-c1">0</span>; i &lt; st-&gt;parsers_num; i++) {</td>
-      </tr>
-      <tr>
-        <td id="L2878" class="blob-num js-line-number" data-line-number="2878"></td>
-        <td id="LC2878" class="blob-code js-file-line">      <span class="pl-s3">mpc_parser_t</span> *q = st-&gt;parsers[i];</td>
-      </tr>
-      <tr>
-        <td id="L2879" class="blob-num js-line-number" data-line-number="2879"></td>
-        <td id="LC2879" class="blob-code js-file-line">      <span class="pl-k">if</span> (q == <span class="pl-c1">NULL</span>) { <span class="pl-k">return</span> <span class="pl-s3">mpc_failf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>Unknown Parser &#39;<span class="pl-c1">%s</span>&#39;!<span class="pl-pds">&quot;</span></span>, x); }</td>
-      </tr>
-      <tr>
-        <td id="L2880" class="blob-num js-line-number" data-line-number="2880"></td>
-        <td id="LC2880" class="blob-code js-file-line">      <span class="pl-k">if</span> (q-&gt;name &amp;&amp; <span class="pl-s3">strcmp</span>(q-&gt;name, x) == <span class="pl-c1">0</span>) { <span class="pl-k">return</span> q; }</td>
-      </tr>
-      <tr>
-        <td id="L2881" class="blob-num js-line-number" data-line-number="2881"></td>
-        <td id="LC2881" class="blob-code js-file-line">    }</td>
-      </tr>
-      <tr>
-        <td id="L2882" class="blob-num js-line-number" data-line-number="2882"></td>
-        <td id="LC2882" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L2883" class="blob-num js-line-number" data-line-number="2883"></td>
-        <td id="LC2883" class="blob-code js-file-line">    <span class="pl-c">/* Search New Parsers */</span></td>
-      </tr>
-      <tr>
-        <td id="L2884" class="blob-num js-line-number" data-line-number="2884"></td>
-        <td id="LC2884" class="blob-code js-file-line">    <span class="pl-k">while</span> (<span class="pl-c1">1</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L2885" class="blob-num js-line-number" data-line-number="2885"></td>
-        <td id="LC2885" class="blob-code js-file-line">    </td>
-      </tr>
-      <tr>
-        <td id="L2886" class="blob-num js-line-number" data-line-number="2886"></td>
-        <td id="LC2886" class="blob-code js-file-line">      p = <span class="pl-s3">va_arg</span>(*st-&gt;va, <span class="pl-s3">mpc_parser_t</span>*);</td>
-      </tr>
-      <tr>
-        <td id="L2887" class="blob-num js-line-number" data-line-number="2887"></td>
-        <td id="LC2887" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L2888" class="blob-num js-line-number" data-line-number="2888"></td>
-        <td id="LC2888" class="blob-code js-file-line">      st-&gt;parsers_num++;</td>
-      </tr>
-      <tr>
-        <td id="L2889" class="blob-num js-line-number" data-line-number="2889"></td>
-        <td id="LC2889" class="blob-code js-file-line">      st-&gt;parsers = <span class="pl-s3">realloc</span>(st-&gt;parsers, <span class="pl-k">sizeof</span>(<span class="pl-s3">mpc_parser_t</span>*) * st-&gt;parsers_num);</td>
-      </tr>
-      <tr>
-        <td id="L2890" class="blob-num js-line-number" data-line-number="2890"></td>
-        <td id="LC2890" class="blob-code js-file-line">      st-&gt;parsers[st-&gt;parsers_num-<span class="pl-c1">1</span>] = p;</td>
-      </tr>
-      <tr>
-        <td id="L2891" class="blob-num js-line-number" data-line-number="2891"></td>
-        <td id="LC2891" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L2892" class="blob-num js-line-number" data-line-number="2892"></td>
-        <td id="LC2892" class="blob-code js-file-line">      <span class="pl-k">if</span> (p == <span class="pl-c1">NULL</span>) { <span class="pl-k">return</span> <span class="pl-s3">mpc_failf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>Unknown Parser &#39;<span class="pl-c1">%s</span>&#39;!<span class="pl-pds">&quot;</span></span>, x); }</td>
-      </tr>
-      <tr>
-        <td id="L2893" class="blob-num js-line-number" data-line-number="2893"></td>
-        <td id="LC2893" class="blob-code js-file-line">      <span class="pl-k">if</span> (p-&gt;name &amp;&amp; <span class="pl-s3">strcmp</span>(p-&gt;name, x) == <span class="pl-c1">0</span>) { <span class="pl-k">return</span> p; }</td>
-      </tr>
-      <tr>
-        <td id="L2894" class="blob-num js-line-number" data-line-number="2894"></td>
-        <td id="LC2894" class="blob-code js-file-line">      </td>
-      </tr>
-      <tr>
-        <td id="L2895" class="blob-num js-line-number" data-line-number="2895"></td>
-        <td id="LC2895" class="blob-code js-file-line">    }</td>
-      </tr>
-      <tr>
-        <td id="L2896" class="blob-num js-line-number" data-line-number="2896"></td>
-        <td id="LC2896" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2897" class="blob-num js-line-number" data-line-number="2897"></td>
-        <td id="LC2897" class="blob-code js-file-line">  }  </td>
-      </tr>
-      <tr>
-        <td id="L2898" class="blob-num js-line-number" data-line-number="2898"></td>
-        <td id="LC2898" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2899" class="blob-num js-line-number" data-line-number="2899"></td>
-        <td id="LC2899" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2900" class="blob-num js-line-number" data-line-number="2900"></td>
-        <td id="LC2900" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2901" class="blob-num js-line-number" data-line-number="2901"></td>
-        <td id="LC2901" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpcaf_grammar_id</span>(<span class="pl-s3">mpc_val_t</span> *x, <span class="pl-st">void</span> *s) {</td>
-      </tr>
-      <tr>
-        <td id="L2902" class="blob-num js-line-number" data-line-number="2902"></td>
-        <td id="LC2902" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2903" class="blob-num js-line-number" data-line-number="2903"></td>
-        <td id="LC2903" class="blob-code js-file-line">  <span class="pl-s3">mpca_grammar_st_t</span> *st = s;</td>
-      </tr>
-      <tr>
-        <td id="L2904" class="blob-num js-line-number" data-line-number="2904"></td>
-        <td id="LC2904" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *p = <span class="pl-s3">mpca_grammar_find_parser</span>(x, st);</td>
-      </tr>
-      <tr>
-        <td id="L2905" class="blob-num js-line-number" data-line-number="2905"></td>
-        <td id="LC2905" class="blob-code js-file-line">  <span class="pl-s3">free</span>(x);</td>
-      </tr>
-      <tr>
-        <td id="L2906" class="blob-num js-line-number" data-line-number="2906"></td>
-        <td id="LC2906" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2907" class="blob-num js-line-number" data-line-number="2907"></td>
-        <td id="LC2907" class="blob-code js-file-line">  <span class="pl-k">if</span> (p-&gt;name) {</td>
-      </tr>
-      <tr>
-        <td id="L2908" class="blob-num js-line-number" data-line-number="2908"></td>
-        <td id="LC2908" class="blob-code js-file-line">    <span class="pl-k">return</span> <span class="pl-s3">mpca_state</span>(<span class="pl-s3">mpca_root</span>(<span class="pl-s3">mpca_add_tag</span>(p, p-&gt;name)));</td>
-      </tr>
-      <tr>
-        <td id="L2909" class="blob-num js-line-number" data-line-number="2909"></td>
-        <td id="LC2909" class="blob-code js-file-line">  } <span class="pl-k">else</span> {</td>
-      </tr>
-      <tr>
-        <td id="L2910" class="blob-num js-line-number" data-line-number="2910"></td>
-        <td id="LC2910" class="blob-code js-file-line">    <span class="pl-k">return</span> <span class="pl-s3">mpca_state</span>(<span class="pl-s3">mpca_root</span>(p));</td>
-      </tr>
-      <tr>
-        <td id="L2911" class="blob-num js-line-number" data-line-number="2911"></td>
-        <td id="LC2911" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L2912" class="blob-num js-line-number" data-line-number="2912"></td>
-        <td id="LC2912" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2913" class="blob-num js-line-number" data-line-number="2913"></td>
-        <td id="LC2913" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2914" class="blob-num js-line-number" data-line-number="2914"></td>
-        <td id="LC2914" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpca_grammar_st</span>(<span class="pl-s">const</span> <span class="pl-st">char</span> *grammar, <span class="pl-s3">mpca_grammar_st_t</span> *st) {</td>
-      </tr>
-      <tr>
-        <td id="L2915" class="blob-num js-line-number" data-line-number="2915"></td>
-        <td id="LC2915" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2916" class="blob-num js-line-number" data-line-number="2916"></td>
-        <td id="LC2916" class="blob-code js-file-line">  <span class="pl-st">char</span> *err_msg;</td>
-      </tr>
-      <tr>
-        <td id="L2917" class="blob-num js-line-number" data-line-number="2917"></td>
-        <td id="LC2917" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *err_out;</td>
-      </tr>
-      <tr>
-        <td id="L2918" class="blob-num js-line-number" data-line-number="2918"></td>
-        <td id="LC2918" class="blob-code js-file-line">  <span class="pl-s3">mpc_result_t</span> r;</td>
-      </tr>
-      <tr>
-        <td id="L2919" class="blob-num js-line-number" data-line-number="2919"></td>
-        <td id="LC2919" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *GrammarTotal, *Grammar, *Term, *Factor, *Base;</td>
-      </tr>
-      <tr>
-        <td id="L2920" class="blob-num js-line-number" data-line-number="2920"></td>
-        <td id="LC2920" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2921" class="blob-num js-line-number" data-line-number="2921"></td>
-        <td id="LC2921" class="blob-code js-file-line">  GrammarTotal = <span class="pl-s3">mpc_new</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>grammar_total<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L2922" class="blob-num js-line-number" data-line-number="2922"></td>
-        <td id="LC2922" class="blob-code js-file-line">  Grammar = <span class="pl-s3">mpc_new</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>grammar<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L2923" class="blob-num js-line-number" data-line-number="2923"></td>
-        <td id="LC2923" class="blob-code js-file-line">  Term = <span class="pl-s3">mpc_new</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>term<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L2924" class="blob-num js-line-number" data-line-number="2924"></td>
-        <td id="LC2924" class="blob-code js-file-line">  Factor = <span class="pl-s3">mpc_new</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>factor<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L2925" class="blob-num js-line-number" data-line-number="2925"></td>
-        <td id="LC2925" class="blob-code js-file-line">  Base = <span class="pl-s3">mpc_new</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>base<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L2926" class="blob-num js-line-number" data-line-number="2926"></td>
-        <td id="LC2926" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2927" class="blob-num js-line-number" data-line-number="2927"></td>
-        <td id="LC2927" class="blob-code js-file-line">  <span class="pl-s3">mpc_define</span>(GrammarTotal,</td>
-      </tr>
-      <tr>
-        <td id="L2928" class="blob-num js-line-number" data-line-number="2928"></td>
-        <td id="LC2928" class="blob-code js-file-line">    <span class="pl-s3">mpc_predictive</span>(<span class="pl-s3">mpc_total</span>(Grammar, mpc_soft_delete))</td>
-      </tr>
-      <tr>
-        <td id="L2929" class="blob-num js-line-number" data-line-number="2929"></td>
-        <td id="LC2929" class="blob-code js-file-line">  );</td>
-      </tr>
-      <tr>
-        <td id="L2930" class="blob-num js-line-number" data-line-number="2930"></td>
-        <td id="LC2930" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2931" class="blob-num js-line-number" data-line-number="2931"></td>
-        <td id="LC2931" class="blob-code js-file-line">  <span class="pl-s3">mpc_define</span>(Grammar, <span class="pl-s3">mpc_and</span>(<span class="pl-c1">2</span>, mpcaf_grammar_or,</td>
-      </tr>
-      <tr>
-        <td id="L2932" class="blob-num js-line-number" data-line-number="2932"></td>
-        <td id="LC2932" class="blob-code js-file-line">    Term,</td>
-      </tr>
-      <tr>
-        <td id="L2933" class="blob-num js-line-number" data-line-number="2933"></td>
-        <td id="LC2933" class="blob-code js-file-line">    <span class="pl-s3">mpc_maybe</span>(<span class="pl-s3">mpc_and</span>(<span class="pl-c1">2</span>, mpcf_snd_free, <span class="pl-s3">mpc_sym</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>|<span class="pl-pds">&quot;</span></span>), Grammar, <span class="pl-s3">free</span>)),</td>
-      </tr>
-      <tr>
-        <td id="L2934" class="blob-num js-line-number" data-line-number="2934"></td>
-        <td id="LC2934" class="blob-code js-file-line">    mpc_soft_delete</td>
-      </tr>
-      <tr>
-        <td id="L2935" class="blob-num js-line-number" data-line-number="2935"></td>
-        <td id="LC2935" class="blob-code js-file-line">  ));</td>
-      </tr>
-      <tr>
-        <td id="L2936" class="blob-num js-line-number" data-line-number="2936"></td>
-        <td id="LC2936" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2937" class="blob-num js-line-number" data-line-number="2937"></td>
-        <td id="LC2937" class="blob-code js-file-line">  <span class="pl-s3">mpc_define</span>(Term, <span class="pl-s3">mpc_many1</span>(mpcaf_grammar_and, Factor));</td>
-      </tr>
-      <tr>
-        <td id="L2938" class="blob-num js-line-number" data-line-number="2938"></td>
-        <td id="LC2938" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2939" class="blob-num js-line-number" data-line-number="2939"></td>
-        <td id="LC2939" class="blob-code js-file-line">  <span class="pl-s3">mpc_define</span>(Factor, <span class="pl-s3">mpc_and</span>(<span class="pl-c1">2</span>, mpcaf_grammar_repeat,</td>
-      </tr>
-      <tr>
-        <td id="L2940" class="blob-num js-line-number" data-line-number="2940"></td>
-        <td id="LC2940" class="blob-code js-file-line">    Base,</td>
-      </tr>
-      <tr>
-        <td id="L2941" class="blob-num js-line-number" data-line-number="2941"></td>
-        <td id="LC2941" class="blob-code js-file-line">      <span class="pl-s3">mpc_or</span>(<span class="pl-c1">6</span>,</td>
-      </tr>
-      <tr>
-        <td id="L2942" class="blob-num js-line-number" data-line-number="2942"></td>
-        <td id="LC2942" class="blob-code js-file-line">        <span class="pl-s3">mpc_sym</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>*<span class="pl-pds">&quot;</span></span>),</td>
-      </tr>
-      <tr>
-        <td id="L2943" class="blob-num js-line-number" data-line-number="2943"></td>
-        <td id="LC2943" class="blob-code js-file-line">        <span class="pl-s3">mpc_sym</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>+<span class="pl-pds">&quot;</span></span>),</td>
-      </tr>
-      <tr>
-        <td id="L2944" class="blob-num js-line-number" data-line-number="2944"></td>
-        <td id="LC2944" class="blob-code js-file-line">        <span class="pl-s3">mpc_sym</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>?<span class="pl-pds">&quot;</span></span>),</td>
-      </tr>
-      <tr>
-        <td id="L2945" class="blob-num js-line-number" data-line-number="2945"></td>
-        <td id="LC2945" class="blob-code js-file-line">        <span class="pl-s3">mpc_sym</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>!<span class="pl-pds">&quot;</span></span>),</td>
-      </tr>
-      <tr>
-        <td id="L2946" class="blob-num js-line-number" data-line-number="2946"></td>
-        <td id="LC2946" class="blob-code js-file-line">        <span class="pl-s3">mpc_tok_brackets</span>(<span class="pl-s3">mpc_int</span>(), <span class="pl-s3">free</span>),</td>
-      </tr>
-      <tr>
-        <td id="L2947" class="blob-num js-line-number" data-line-number="2947"></td>
-        <td id="LC2947" class="blob-code js-file-line">        <span class="pl-s3">mpc_pass</span>()),</td>
-      </tr>
-      <tr>
-        <td id="L2948" class="blob-num js-line-number" data-line-number="2948"></td>
-        <td id="LC2948" class="blob-code js-file-line">    mpc_soft_delete</td>
-      </tr>
-      <tr>
-        <td id="L2949" class="blob-num js-line-number" data-line-number="2949"></td>
-        <td id="LC2949" class="blob-code js-file-line">  ));</td>
-      </tr>
-      <tr>
-        <td id="L2950" class="blob-num js-line-number" data-line-number="2950"></td>
-        <td id="LC2950" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2951" class="blob-num js-line-number" data-line-number="2951"></td>
-        <td id="LC2951" class="blob-code js-file-line">  <span class="pl-s3">mpc_define</span>(Base, <span class="pl-s3">mpc_or</span>(<span class="pl-c1">5</span>,</td>
-      </tr>
-      <tr>
-        <td id="L2952" class="blob-num js-line-number" data-line-number="2952"></td>
-        <td id="LC2952" class="blob-code js-file-line">    <span class="pl-s3">mpc_apply_to</span>(<span class="pl-s3">mpc_tok</span>(<span class="pl-s3">mpc_string_lit</span>()), mpcaf_grammar_string, st),</td>
-      </tr>
-      <tr>
-        <td id="L2953" class="blob-num js-line-number" data-line-number="2953"></td>
-        <td id="LC2953" class="blob-code js-file-line">    <span class="pl-s3">mpc_apply_to</span>(<span class="pl-s3">mpc_tok</span>(<span class="pl-s3">mpc_char_lit</span>()),   mpcaf_grammar_char, st),</td>
-      </tr>
-      <tr>
-        <td id="L2954" class="blob-num js-line-number" data-line-number="2954"></td>
-        <td id="LC2954" class="blob-code js-file-line">    <span class="pl-s3">mpc_apply_to</span>(<span class="pl-s3">mpc_tok</span>(<span class="pl-s3">mpc_regex_lit</span>()),  mpcaf_grammar_regex, st),</td>
-      </tr>
-      <tr>
-        <td id="L2955" class="blob-num js-line-number" data-line-number="2955"></td>
-        <td id="LC2955" class="blob-code js-file-line">    <span class="pl-s3">mpc_apply_to</span>(<span class="pl-s3">mpc_tok_braces</span>(<span class="pl-s3">mpc_or</span>(<span class="pl-c1">2</span>, <span class="pl-s3">mpc_digits</span>(), <span class="pl-s3">mpc_ident</span>()), <span class="pl-s3">free</span>), mpcaf_grammar_id, st),</td>
-      </tr>
-      <tr>
-        <td id="L2956" class="blob-num js-line-number" data-line-number="2956"></td>
-        <td id="LC2956" class="blob-code js-file-line">    <span class="pl-s3">mpc_tok_parens</span>(Grammar, mpc_soft_delete)</td>
-      </tr>
-      <tr>
-        <td id="L2957" class="blob-num js-line-number" data-line-number="2957"></td>
-        <td id="LC2957" class="blob-code js-file-line">  ));</td>
-      </tr>
-      <tr>
-        <td id="L2958" class="blob-num js-line-number" data-line-number="2958"></td>
-        <td id="LC2958" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2959" class="blob-num js-line-number" data-line-number="2959"></td>
-        <td id="LC2959" class="blob-code js-file-line">  <span class="pl-k">if</span>(!<span class="pl-s3">mpc_parse</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>&lt;mpc_grammar_compiler&gt;<span class="pl-pds">&quot;</span></span>, grammar, GrammarTotal, &amp;r)) {</td>
-      </tr>
-      <tr>
-        <td id="L2960" class="blob-num js-line-number" data-line-number="2960"></td>
-        <td id="LC2960" class="blob-code js-file-line">    err_msg = <span class="pl-s3">mpc_err_string</span>(r.<span class="pl-vo">error</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2961" class="blob-num js-line-number" data-line-number="2961"></td>
-        <td id="LC2961" class="blob-code js-file-line">    err_out = <span class="pl-s3">mpc_failf</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>Invalid Grammar: <span class="pl-c1">%s</span><span class="pl-pds">&quot;</span></span>, err_msg);</td>
-      </tr>
-      <tr>
-        <td id="L2962" class="blob-num js-line-number" data-line-number="2962"></td>
-        <td id="LC2962" class="blob-code js-file-line">    <span class="pl-s3">mpc_err_delete</span>(r.<span class="pl-vo">error</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2963" class="blob-num js-line-number" data-line-number="2963"></td>
-        <td id="LC2963" class="blob-code js-file-line">    <span class="pl-s3">free</span>(err_msg);</td>
-      </tr>
-      <tr>
-        <td id="L2964" class="blob-num js-line-number" data-line-number="2964"></td>
-        <td id="LC2964" class="blob-code js-file-line">    r.<span class="pl-vo">output</span> = err_out;</td>
-      </tr>
-      <tr>
-        <td id="L2965" class="blob-num js-line-number" data-line-number="2965"></td>
-        <td id="LC2965" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L2966" class="blob-num js-line-number" data-line-number="2966"></td>
-        <td id="LC2966" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2967" class="blob-num js-line-number" data-line-number="2967"></td>
-        <td id="LC2967" class="blob-code js-file-line">  <span class="pl-s3">mpc_cleanup</span>(<span class="pl-c1">5</span>, GrammarTotal, Grammar, Term, Factor, Base);</td>
-      </tr>
-      <tr>
-        <td id="L2968" class="blob-num js-line-number" data-line-number="2968"></td>
-        <td id="LC2968" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2969" class="blob-num js-line-number" data-line-number="2969"></td>
-        <td id="LC2969" class="blob-code js-file-line">  <span class="pl-k">return</span> (st-&gt;flags &amp; MPCA_LANG_PREDICTIVE) ? <span class="pl-s3">mpc_predictive</span>(r.<span class="pl-vo">output</span>) : r.<span class="pl-vo">output</span>;</td>
-      </tr>
-      <tr>
-        <td id="L2970" class="blob-num js-line-number" data-line-number="2970"></td>
-        <td id="LC2970" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2971" class="blob-num js-line-number" data-line-number="2971"></td>
-        <td id="LC2971" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2972" class="blob-num js-line-number" data-line-number="2972"></td>
-        <td id="LC2972" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2973" class="blob-num js-line-number" data-line-number="2973"></td>
-        <td id="LC2973" class="blob-code js-file-line"><span class="pl-s3">mpc_parser_t</span> *<span class="pl-en">mpca_grammar</span>(<span class="pl-st">int</span> flags, <span class="pl-s">const</span> <span class="pl-st">char</span> *grammar, ...) {</td>
-      </tr>
-      <tr>
-        <td id="L2974" class="blob-num js-line-number" data-line-number="2974"></td>
-        <td id="LC2974" class="blob-code js-file-line">  <span class="pl-s3">mpca_grammar_st_t</span> st;</td>
-      </tr>
-      <tr>
-        <td id="L2975" class="blob-num js-line-number" data-line-number="2975"></td>
-        <td id="LC2975" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *res;</td>
-      </tr>
-      <tr>
-        <td id="L2976" class="blob-num js-line-number" data-line-number="2976"></td>
-        <td id="LC2976" class="blob-code js-file-line">  <span class="pl-s3">va_list</span> va;</td>
-      </tr>
-      <tr>
-        <td id="L2977" class="blob-num js-line-number" data-line-number="2977"></td>
-        <td id="LC2977" class="blob-code js-file-line">  <span class="pl-s3">va_start</span>(va, grammar);</td>
-      </tr>
-      <tr>
-        <td id="L2978" class="blob-num js-line-number" data-line-number="2978"></td>
-        <td id="LC2978" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2979" class="blob-num js-line-number" data-line-number="2979"></td>
-        <td id="LC2979" class="blob-code js-file-line">  st.<span class="pl-vo">va</span> = &amp;va;</td>
-      </tr>
-      <tr>
-        <td id="L2980" class="blob-num js-line-number" data-line-number="2980"></td>
-        <td id="LC2980" class="blob-code js-file-line">  st.<span class="pl-vo">parsers_num</span> = <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L2981" class="blob-num js-line-number" data-line-number="2981"></td>
-        <td id="LC2981" class="blob-code js-file-line">  st.<span class="pl-vo">parsers</span> = <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L2982" class="blob-num js-line-number" data-line-number="2982"></td>
-        <td id="LC2982" class="blob-code js-file-line">  st.<span class="pl-vo">flags</span> = flags;</td>
-      </tr>
-      <tr>
-        <td id="L2983" class="blob-num js-line-number" data-line-number="2983"></td>
-        <td id="LC2983" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L2984" class="blob-num js-line-number" data-line-number="2984"></td>
-        <td id="LC2984" class="blob-code js-file-line">  res = <span class="pl-s3">mpca_grammar_st</span>(grammar, &amp;st);  </td>
-      </tr>
-      <tr>
-        <td id="L2985" class="blob-num js-line-number" data-line-number="2985"></td>
-        <td id="LC2985" class="blob-code js-file-line">  <span class="pl-s3">free</span>(st.<span class="pl-vo">parsers</span>);</td>
-      </tr>
-      <tr>
-        <td id="L2986" class="blob-num js-line-number" data-line-number="2986"></td>
-        <td id="LC2986" class="blob-code js-file-line">  <span class="pl-s3">va_end</span>(va);</td>
-      </tr>
-      <tr>
-        <td id="L2987" class="blob-num js-line-number" data-line-number="2987"></td>
-        <td id="LC2987" class="blob-code js-file-line">  <span class="pl-k">return</span> res;</td>
-      </tr>
-      <tr>
-        <td id="L2988" class="blob-num js-line-number" data-line-number="2988"></td>
-        <td id="LC2988" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L2989" class="blob-num js-line-number" data-line-number="2989"></td>
-        <td id="LC2989" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2990" class="blob-num js-line-number" data-line-number="2990"></td>
-        <td id="LC2990" class="blob-code js-file-line"><span class="pl-st">typedef</span> <span class="pl-st">struct</span> {</td>
-      </tr>
-      <tr>
-        <td id="L2991" class="blob-num js-line-number" data-line-number="2991"></td>
-        <td id="LC2991" class="blob-code js-file-line">  <span class="pl-st">char</span> *ident;</td>
-      </tr>
-      <tr>
-        <td id="L2992" class="blob-num js-line-number" data-line-number="2992"></td>
-        <td id="LC2992" class="blob-code js-file-line">  <span class="pl-st">char</span> *name;</td>
-      </tr>
-      <tr>
-        <td id="L2993" class="blob-num js-line-number" data-line-number="2993"></td>
-        <td id="LC2993" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *grammar;</td>
-      </tr>
-      <tr>
-        <td id="L2994" class="blob-num js-line-number" data-line-number="2994"></td>
-        <td id="LC2994" class="blob-code js-file-line">} <span class="pl-s3">mpca_stmt_t</span>;</td>
-      </tr>
-      <tr>
-        <td id="L2995" class="blob-num js-line-number" data-line-number="2995"></td>
-        <td id="LC2995" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L2996" class="blob-num js-line-number" data-line-number="2996"></td>
-        <td id="LC2996" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpca_stmt_afold</span>(<span class="pl-st">int</span> n, <span class="pl-s3">mpc_val_t</span> **xs) {</td>
-      </tr>
-      <tr>
-        <td id="L2997" class="blob-num js-line-number" data-line-number="2997"></td>
-        <td id="LC2997" class="blob-code js-file-line">  <span class="pl-s3">mpca_stmt_t</span> *stmt = <span class="pl-s3">malloc</span>(<span class="pl-k">sizeof</span>(<span class="pl-s3">mpca_stmt_t</span>));</td>
-      </tr>
-      <tr>
-        <td id="L2998" class="blob-num js-line-number" data-line-number="2998"></td>
-        <td id="LC2998" class="blob-code js-file-line">  stmt-&gt;ident = ((<span class="pl-st">char</span>**)xs)[<span class="pl-c1">0</span>];</td>
-      </tr>
-      <tr>
-        <td id="L2999" class="blob-num js-line-number" data-line-number="2999"></td>
-        <td id="LC2999" class="blob-code js-file-line">  stmt-&gt;name = ((<span class="pl-st">char</span>**)xs)[<span class="pl-c1">1</span>];</td>
-      </tr>
-      <tr>
-        <td id="L3000" class="blob-num js-line-number" data-line-number="3000"></td>
-        <td id="LC3000" class="blob-code js-file-line">  stmt-&gt;grammar = ((<span class="pl-s3">mpc_parser_t</span>**)xs)[<span class="pl-c1">3</span>];</td>
-      </tr>
-      <tr>
-        <td id="L3001" class="blob-num js-line-number" data-line-number="3001"></td>
-        <td id="LC3001" class="blob-code js-file-line">  (<span class="pl-st">void</span>) n;</td>
-      </tr>
-      <tr>
-        <td id="L3002" class="blob-num js-line-number" data-line-number="3002"></td>
-        <td id="LC3002" class="blob-code js-file-line">  <span class="pl-s3">free</span>(((<span class="pl-st">char</span>**)xs)[<span class="pl-c1">2</span>]);</td>
-      </tr>
-      <tr>
-        <td id="L3003" class="blob-num js-line-number" data-line-number="3003"></td>
-        <td id="LC3003" class="blob-code js-file-line">  <span class="pl-s3">free</span>(((<span class="pl-st">char</span>**)xs)[<span class="pl-c1">4</span>]);</td>
-      </tr>
-      <tr>
-        <td id="L3004" class="blob-num js-line-number" data-line-number="3004"></td>
-        <td id="LC3004" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3005" class="blob-num js-line-number" data-line-number="3005"></td>
-        <td id="LC3005" class="blob-code js-file-line">  <span class="pl-k">return</span> stmt;</td>
-      </tr>
-      <tr>
-        <td id="L3006" class="blob-num js-line-number" data-line-number="3006"></td>
-        <td id="LC3006" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L3007" class="blob-num js-line-number" data-line-number="3007"></td>
-        <td id="LC3007" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L3008" class="blob-num js-line-number" data-line-number="3008"></td>
-        <td id="LC3008" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpca_stmt_fold</span>(<span class="pl-st">int</span> n, <span class="pl-s3">mpc_val_t</span> **xs) {</td>
-      </tr>
-      <tr>
-        <td id="L3009" class="blob-num js-line-number" data-line-number="3009"></td>
-        <td id="LC3009" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3010" class="blob-num js-line-number" data-line-number="3010"></td>
-        <td id="LC3010" class="blob-code js-file-line">  <span class="pl-st">int</span> i;</td>
-      </tr>
-      <tr>
-        <td id="L3011" class="blob-num js-line-number" data-line-number="3011"></td>
-        <td id="LC3011" class="blob-code js-file-line">  <span class="pl-s3">mpca_stmt_t</span> **stmts = <span class="pl-s3">malloc</span>(<span class="pl-k">sizeof</span>(<span class="pl-s3">mpca_stmt_t</span>*) * (n+<span class="pl-c1">1</span>));</td>
-      </tr>
-      <tr>
-        <td id="L3012" class="blob-num js-line-number" data-line-number="3012"></td>
-        <td id="LC3012" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3013" class="blob-num js-line-number" data-line-number="3013"></td>
-        <td id="LC3013" class="blob-code js-file-line">  <span class="pl-k">for</span> (i = <span class="pl-c1">0</span>; i &lt; n; i++) {</td>
-      </tr>
-      <tr>
-        <td id="L3014" class="blob-num js-line-number" data-line-number="3014"></td>
-        <td id="LC3014" class="blob-code js-file-line">    stmts[i] = xs[i];</td>
-      </tr>
-      <tr>
-        <td id="L3015" class="blob-num js-line-number" data-line-number="3015"></td>
-        <td id="LC3015" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L3016" class="blob-num js-line-number" data-line-number="3016"></td>
-        <td id="LC3016" class="blob-code js-file-line">  stmts[n] = <span class="pl-c1">NULL</span>;  </td>
-      </tr>
-      <tr>
-        <td id="L3017" class="blob-num js-line-number" data-line-number="3017"></td>
-        <td id="LC3017" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3018" class="blob-num js-line-number" data-line-number="3018"></td>
-        <td id="LC3018" class="blob-code js-file-line">  <span class="pl-k">return</span> stmts;</td>
-      </tr>
-      <tr>
-        <td id="L3019" class="blob-num js-line-number" data-line-number="3019"></td>
-        <td id="LC3019" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L3020" class="blob-num js-line-number" data-line-number="3020"></td>
-        <td id="LC3020" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L3021" class="blob-num js-line-number" data-line-number="3021"></td>
-        <td id="LC3021" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-st">void</span> <span class="pl-en">mpca_stmt_list_delete</span>(<span class="pl-s3">mpc_val_t</span> *x) {</td>
-      </tr>
-      <tr>
-        <td id="L3022" class="blob-num js-line-number" data-line-number="3022"></td>
-        <td id="LC3022" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L3023" class="blob-num js-line-number" data-line-number="3023"></td>
-        <td id="LC3023" class="blob-code js-file-line">  <span class="pl-s3">mpca_stmt_t</span> **stmts = x;</td>
-      </tr>
-      <tr>
-        <td id="L3024" class="blob-num js-line-number" data-line-number="3024"></td>
-        <td id="LC3024" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L3025" class="blob-num js-line-number" data-line-number="3025"></td>
-        <td id="LC3025" class="blob-code js-file-line">  <span class="pl-k">while</span>(*stmts) {</td>
-      </tr>
-      <tr>
-        <td id="L3026" class="blob-num js-line-number" data-line-number="3026"></td>
-        <td id="LC3026" class="blob-code js-file-line">    <span class="pl-s3">mpca_stmt_t</span> *stmt = *stmts; </td>
-      </tr>
-      <tr>
-        <td id="L3027" class="blob-num js-line-number" data-line-number="3027"></td>
-        <td id="LC3027" class="blob-code js-file-line">    <span class="pl-s3">free</span>(stmt-&gt;ident);</td>
-      </tr>
-      <tr>
-        <td id="L3028" class="blob-num js-line-number" data-line-number="3028"></td>
-        <td id="LC3028" class="blob-code js-file-line">    <span class="pl-s3">free</span>(stmt-&gt;name);</td>
-      </tr>
-      <tr>
-        <td id="L3029" class="blob-num js-line-number" data-line-number="3029"></td>
-        <td id="LC3029" class="blob-code js-file-line">    <span class="pl-s3">mpc_soft_delete</span>(stmt-&gt;grammar);</td>
-      </tr>
-      <tr>
-        <td id="L3030" class="blob-num js-line-number" data-line-number="3030"></td>
-        <td id="LC3030" class="blob-code js-file-line">    <span class="pl-s3">free</span>(stmt);  </td>
-      </tr>
-      <tr>
-        <td id="L3031" class="blob-num js-line-number" data-line-number="3031"></td>
-        <td id="LC3031" class="blob-code js-file-line">    stmts++;</td>
-      </tr>
-      <tr>
-        <td id="L3032" class="blob-num js-line-number" data-line-number="3032"></td>
-        <td id="LC3032" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L3033" class="blob-num js-line-number" data-line-number="3033"></td>
-        <td id="LC3033" class="blob-code js-file-line">  <span class="pl-s3">free</span>(x);</td>
-      </tr>
-      <tr>
-        <td id="L3034" class="blob-num js-line-number" data-line-number="3034"></td>
-        <td id="LC3034" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L3035" class="blob-num js-line-number" data-line-number="3035"></td>
-        <td id="LC3035" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L3036" class="blob-num js-line-number" data-line-number="3036"></td>
-        <td id="LC3036" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L3037" class="blob-num js-line-number" data-line-number="3037"></td>
-        <td id="LC3037" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_val_t</span> *<span class="pl-en">mpca_stmt_list_apply_to</span>(<span class="pl-s3">mpc_val_t</span> *x, <span class="pl-st">void</span> *s) {</td>
-      </tr>
-      <tr>
-        <td id="L3038" class="blob-num js-line-number" data-line-number="3038"></td>
-        <td id="LC3038" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L3039" class="blob-num js-line-number" data-line-number="3039"></td>
-        <td id="LC3039" class="blob-code js-file-line">  <span class="pl-s3">mpca_grammar_st_t</span> *st = s;</td>
-      </tr>
-      <tr>
-        <td id="L3040" class="blob-num js-line-number" data-line-number="3040"></td>
-        <td id="LC3040" class="blob-code js-file-line">  <span class="pl-s3">mpca_stmt_t</span> *stmt;</td>
-      </tr>
-      <tr>
-        <td id="L3041" class="blob-num js-line-number" data-line-number="3041"></td>
-        <td id="LC3041" class="blob-code js-file-line">  <span class="pl-s3">mpca_stmt_t</span> **stmts = x;</td>
-      </tr>
-      <tr>
-        <td id="L3042" class="blob-num js-line-number" data-line-number="3042"></td>
-        <td id="LC3042" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *left;</td>
-      </tr>
-      <tr>
-        <td id="L3043" class="blob-num js-line-number" data-line-number="3043"></td>
-        <td id="LC3043" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L3044" class="blob-num js-line-number" data-line-number="3044"></td>
-        <td id="LC3044" class="blob-code js-file-line">  <span class="pl-k">while</span>(*stmts) {</td>
-      </tr>
-      <tr>
-        <td id="L3045" class="blob-num js-line-number" data-line-number="3045"></td>
-        <td id="LC3045" class="blob-code js-file-line">    stmt = *stmts;</td>
-      </tr>
-      <tr>
-        <td id="L3046" class="blob-num js-line-number" data-line-number="3046"></td>
-        <td id="LC3046" class="blob-code js-file-line">    left = <span class="pl-s3">mpca_grammar_find_parser</span>(stmt-&gt;ident, st);</td>
-      </tr>
-      <tr>
-        <td id="L3047" class="blob-num js-line-number" data-line-number="3047"></td>
-        <td id="LC3047" class="blob-code js-file-line">    <span class="pl-k">if</span> (st-&gt;flags &amp; MPCA_LANG_PREDICTIVE) { stmt-&gt;grammar = <span class="pl-s3">mpc_predictive</span>(stmt-&gt;grammar); }</td>
-      </tr>
-      <tr>
-        <td id="L3048" class="blob-num js-line-number" data-line-number="3048"></td>
-        <td id="LC3048" class="blob-code js-file-line">    <span class="pl-k">if</span> (stmt-&gt;name) { stmt-&gt;grammar = <span class="pl-s3">mpc_expect</span>(stmt-&gt;grammar, stmt-&gt;name); }</td>
-      </tr>
-      <tr>
-        <td id="L3049" class="blob-num js-line-number" data-line-number="3049"></td>
-        <td id="LC3049" class="blob-code js-file-line">    <span class="pl-s3">mpc_define</span>(left, stmt-&gt;grammar);</td>
-      </tr>
-      <tr>
-        <td id="L3050" class="blob-num js-line-number" data-line-number="3050"></td>
-        <td id="LC3050" class="blob-code js-file-line">    <span class="pl-s3">free</span>(stmt-&gt;ident);</td>
-      </tr>
-      <tr>
-        <td id="L3051" class="blob-num js-line-number" data-line-number="3051"></td>
-        <td id="LC3051" class="blob-code js-file-line">    <span class="pl-s3">free</span>(stmt-&gt;name);</td>
-      </tr>
-      <tr>
-        <td id="L3052" class="blob-num js-line-number" data-line-number="3052"></td>
-        <td id="LC3052" class="blob-code js-file-line">    <span class="pl-s3">free</span>(stmt);</td>
-      </tr>
-      <tr>
-        <td id="L3053" class="blob-num js-line-number" data-line-number="3053"></td>
-        <td id="LC3053" class="blob-code js-file-line">    stmts++;</td>
-      </tr>
-      <tr>
-        <td id="L3054" class="blob-num js-line-number" data-line-number="3054"></td>
-        <td id="LC3054" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L3055" class="blob-num js-line-number" data-line-number="3055"></td>
-        <td id="LC3055" class="blob-code js-file-line">  <span class="pl-s3">free</span>(x);</td>
-      </tr>
-      <tr>
-        <td id="L3056" class="blob-num js-line-number" data-line-number="3056"></td>
-        <td id="LC3056" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3057" class="blob-num js-line-number" data-line-number="3057"></td>
-        <td id="LC3057" class="blob-code js-file-line">  <span class="pl-k">return</span> <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L3058" class="blob-num js-line-number" data-line-number="3058"></td>
-        <td id="LC3058" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L3059" class="blob-num js-line-number" data-line-number="3059"></td>
-        <td id="LC3059" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L3060" class="blob-num js-line-number" data-line-number="3060"></td>
-        <td id="LC3060" class="blob-code js-file-line"><span class="pl-s">static</span> <span class="pl-s3">mpc_err_t</span> *<span class="pl-en">mpca_lang_st</span>(<span class="pl-s3">mpc_input_t</span> *i, <span class="pl-s3">mpca_grammar_st_t</span> *st) {</td>
-      </tr>
-      <tr>
-        <td id="L3061" class="blob-num js-line-number" data-line-number="3061"></td>
-        <td id="LC3061" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3062" class="blob-num js-line-number" data-line-number="3062"></td>
-        <td id="LC3062" class="blob-code js-file-line">  <span class="pl-s3">mpc_result_t</span> r;</td>
-      </tr>
-      <tr>
-        <td id="L3063" class="blob-num js-line-number" data-line-number="3063"></td>
-        <td id="LC3063" class="blob-code js-file-line">  <span class="pl-s3">mpc_err_t</span> *e;</td>
-      </tr>
-      <tr>
-        <td id="L3064" class="blob-num js-line-number" data-line-number="3064"></td>
-        <td id="LC3064" class="blob-code js-file-line">  <span class="pl-s3">mpc_parser_t</span> *Lang, *Stmt, *Grammar, *Term, *Factor, *Base; </td>
-      </tr>
-      <tr>
-        <td id="L3065" class="blob-num js-line-number" data-line-number="3065"></td>
-        <td id="LC3065" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3066" class="blob-num js-line-number" data-line-number="3066"></td>
-        <td id="LC3066" class="blob-code js-file-line">  Lang    = <span class="pl-s3">mpc_new</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>lang<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L3067" class="blob-num js-line-number" data-line-number="3067"></td>
-        <td id="LC3067" class="blob-code js-file-line">  Stmt    = <span class="pl-s3">mpc_new</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>stmt<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L3068" class="blob-num js-line-number" data-line-number="3068"></td>
-        <td id="LC3068" class="blob-code js-file-line">  Grammar = <span class="pl-s3">mpc_new</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>grammar<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L3069" class="blob-num js-line-number" data-line-number="3069"></td>
-        <td id="LC3069" class="blob-code js-file-line">  Term    = <span class="pl-s3">mpc_new</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>term<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L3070" class="blob-num js-line-number" data-line-number="3070"></td>
-        <td id="LC3070" class="blob-code js-file-line">  Factor  = <span class="pl-s3">mpc_new</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>factor<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L3071" class="blob-num js-line-number" data-line-number="3071"></td>
-        <td id="LC3071" class="blob-code js-file-line">  Base    = <span class="pl-s3">mpc_new</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>base<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L3072" class="blob-num js-line-number" data-line-number="3072"></td>
-        <td id="LC3072" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3073" class="blob-num js-line-number" data-line-number="3073"></td>
-        <td id="LC3073" class="blob-code js-file-line">  <span class="pl-s3">mpc_define</span>(Lang, <span class="pl-s3">mpc_apply_to</span>(</td>
-      </tr>
-      <tr>
-        <td id="L3074" class="blob-num js-line-number" data-line-number="3074"></td>
-        <td id="LC3074" class="blob-code js-file-line">    <span class="pl-s3">mpc_total</span>(<span class="pl-s3">mpc_predictive</span>(<span class="pl-s3">mpc_many</span>(mpca_stmt_fold, Stmt)), mpca_stmt_list_delete),</td>
-      </tr>
-      <tr>
-        <td id="L3075" class="blob-num js-line-number" data-line-number="3075"></td>
-        <td id="LC3075" class="blob-code js-file-line">    mpca_stmt_list_apply_to, st</td>
-      </tr>
-      <tr>
-        <td id="L3076" class="blob-num js-line-number" data-line-number="3076"></td>
-        <td id="LC3076" class="blob-code js-file-line">  ));</td>
-      </tr>
-      <tr>
-        <td id="L3077" class="blob-num js-line-number" data-line-number="3077"></td>
-        <td id="LC3077" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3078" class="blob-num js-line-number" data-line-number="3078"></td>
-        <td id="LC3078" class="blob-code js-file-line">  <span class="pl-s3">mpc_define</span>(Stmt, <span class="pl-s3">mpc_and</span>(<span class="pl-c1">5</span>, mpca_stmt_afold,</td>
-      </tr>
-      <tr>
-        <td id="L3079" class="blob-num js-line-number" data-line-number="3079"></td>
-        <td id="LC3079" class="blob-code js-file-line">    <span class="pl-s3">mpc_tok</span>(<span class="pl-s3">mpc_ident</span>()), <span class="pl-s3">mpc_maybe</span>(<span class="pl-s3">mpc_tok</span>(<span class="pl-s3">mpc_string_lit</span>())), <span class="pl-s3">mpc_sym</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>:<span class="pl-pds">&quot;</span></span>), Grammar, <span class="pl-s3">mpc_sym</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>;<span class="pl-pds">&quot;</span></span>),</td>
-      </tr>
-      <tr>
-        <td id="L3080" class="blob-num js-line-number" data-line-number="3080"></td>
-        <td id="LC3080" class="blob-code js-file-line">    <span class="pl-s3">free</span>, <span class="pl-s3">free</span>, <span class="pl-s3">free</span>, mpc_soft_delete</td>
-      </tr>
-      <tr>
-        <td id="L3081" class="blob-num js-line-number" data-line-number="3081"></td>
-        <td id="LC3081" class="blob-code js-file-line">  ));</td>
-      </tr>
-      <tr>
-        <td id="L3082" class="blob-num js-line-number" data-line-number="3082"></td>
-        <td id="LC3082" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3083" class="blob-num js-line-number" data-line-number="3083"></td>
-        <td id="LC3083" class="blob-code js-file-line">  <span class="pl-s3">mpc_define</span>(Grammar, <span class="pl-s3">mpc_and</span>(<span class="pl-c1">2</span>, mpcaf_grammar_or,</td>
-      </tr>
-      <tr>
-        <td id="L3084" class="blob-num js-line-number" data-line-number="3084"></td>
-        <td id="LC3084" class="blob-code js-file-line">      Term,</td>
-      </tr>
-      <tr>
-        <td id="L3085" class="blob-num js-line-number" data-line-number="3085"></td>
-        <td id="LC3085" class="blob-code js-file-line">      <span class="pl-s3">mpc_maybe</span>(<span class="pl-s3">mpc_and</span>(<span class="pl-c1">2</span>, mpcf_snd_free, <span class="pl-s3">mpc_sym</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>|<span class="pl-pds">&quot;</span></span>), Grammar, <span class="pl-s3">free</span>)),</td>
-      </tr>
-      <tr>
-        <td id="L3086" class="blob-num js-line-number" data-line-number="3086"></td>
-        <td id="LC3086" class="blob-code js-file-line">      mpc_soft_delete</td>
-      </tr>
-      <tr>
-        <td id="L3087" class="blob-num js-line-number" data-line-number="3087"></td>
-        <td id="LC3087" class="blob-code js-file-line">  ));</td>
-      </tr>
-      <tr>
-        <td id="L3088" class="blob-num js-line-number" data-line-number="3088"></td>
-        <td id="LC3088" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3089" class="blob-num js-line-number" data-line-number="3089"></td>
-        <td id="LC3089" class="blob-code js-file-line">  <span class="pl-s3">mpc_define</span>(Term, <span class="pl-s3">mpc_many1</span>(mpcaf_grammar_and, Factor));</td>
-      </tr>
-      <tr>
-        <td id="L3090" class="blob-num js-line-number" data-line-number="3090"></td>
-        <td id="LC3090" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3091" class="blob-num js-line-number" data-line-number="3091"></td>
-        <td id="LC3091" class="blob-code js-file-line">  <span class="pl-s3">mpc_define</span>(Factor, <span class="pl-s3">mpc_and</span>(<span class="pl-c1">2</span>, mpcaf_grammar_repeat,</td>
-      </tr>
-      <tr>
-        <td id="L3092" class="blob-num js-line-number" data-line-number="3092"></td>
-        <td id="LC3092" class="blob-code js-file-line">    Base,</td>
-      </tr>
-      <tr>
-        <td id="L3093" class="blob-num js-line-number" data-line-number="3093"></td>
-        <td id="LC3093" class="blob-code js-file-line">      <span class="pl-s3">mpc_or</span>(<span class="pl-c1">6</span>,</td>
-      </tr>
-      <tr>
-        <td id="L3094" class="blob-num js-line-number" data-line-number="3094"></td>
-        <td id="LC3094" class="blob-code js-file-line">        <span class="pl-s3">mpc_sym</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>*<span class="pl-pds">&quot;</span></span>),</td>
-      </tr>
-      <tr>
-        <td id="L3095" class="blob-num js-line-number" data-line-number="3095"></td>
-        <td id="LC3095" class="blob-code js-file-line">        <span class="pl-s3">mpc_sym</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>+<span class="pl-pds">&quot;</span></span>),</td>
-      </tr>
-      <tr>
-        <td id="L3096" class="blob-num js-line-number" data-line-number="3096"></td>
-        <td id="LC3096" class="blob-code js-file-line">        <span class="pl-s3">mpc_sym</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>?<span class="pl-pds">&quot;</span></span>),</td>
-      </tr>
-      <tr>
-        <td id="L3097" class="blob-num js-line-number" data-line-number="3097"></td>
-        <td id="LC3097" class="blob-code js-file-line">        <span class="pl-s3">mpc_sym</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>!<span class="pl-pds">&quot;</span></span>),</td>
-      </tr>
-      <tr>
-        <td id="L3098" class="blob-num js-line-number" data-line-number="3098"></td>
-        <td id="LC3098" class="blob-code js-file-line">        <span class="pl-s3">mpc_tok_brackets</span>(<span class="pl-s3">mpc_int</span>(), <span class="pl-s3">free</span>),</td>
-      </tr>
-      <tr>
-        <td id="L3099" class="blob-num js-line-number" data-line-number="3099"></td>
-        <td id="LC3099" class="blob-code js-file-line">        <span class="pl-s3">mpc_pass</span>()),</td>
-      </tr>
-      <tr>
-        <td id="L3100" class="blob-num js-line-number" data-line-number="3100"></td>
-        <td id="LC3100" class="blob-code js-file-line">    mpc_soft_delete</td>
-      </tr>
-      <tr>
-        <td id="L3101" class="blob-num js-line-number" data-line-number="3101"></td>
-        <td id="LC3101" class="blob-code js-file-line">  ));</td>
-      </tr>
-      <tr>
-        <td id="L3102" class="blob-num js-line-number" data-line-number="3102"></td>
-        <td id="LC3102" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3103" class="blob-num js-line-number" data-line-number="3103"></td>
-        <td id="LC3103" class="blob-code js-file-line">  <span class="pl-s3">mpc_define</span>(Base, <span class="pl-s3">mpc_or</span>(<span class="pl-c1">5</span>,</td>
-      </tr>
-      <tr>
-        <td id="L3104" class="blob-num js-line-number" data-line-number="3104"></td>
-        <td id="LC3104" class="blob-code js-file-line">    <span class="pl-s3">mpc_apply_to</span>(<span class="pl-s3">mpc_tok</span>(<span class="pl-s3">mpc_string_lit</span>()), mpcaf_grammar_string, st),</td>
-      </tr>
-      <tr>
-        <td id="L3105" class="blob-num js-line-number" data-line-number="3105"></td>
-        <td id="LC3105" class="blob-code js-file-line">    <span class="pl-s3">mpc_apply_to</span>(<span class="pl-s3">mpc_tok</span>(<span class="pl-s3">mpc_char_lit</span>()),   mpcaf_grammar_char, st),</td>
-      </tr>
-      <tr>
-        <td id="L3106" class="blob-num js-line-number" data-line-number="3106"></td>
-        <td id="LC3106" class="blob-code js-file-line">    <span class="pl-s3">mpc_apply_to</span>(<span class="pl-s3">mpc_tok</span>(<span class="pl-s3">mpc_regex_lit</span>()),  mpcaf_grammar_regex, st),</td>
-      </tr>
-      <tr>
-        <td id="L3107" class="blob-num js-line-number" data-line-number="3107"></td>
-        <td id="LC3107" class="blob-code js-file-line">    <span class="pl-s3">mpc_apply_to</span>(<span class="pl-s3">mpc_tok_braces</span>(<span class="pl-s3">mpc_or</span>(<span class="pl-c1">2</span>, <span class="pl-s3">mpc_digits</span>(), <span class="pl-s3">mpc_ident</span>()), <span class="pl-s3">free</span>), mpcaf_grammar_id, st),</td>
-      </tr>
-      <tr>
-        <td id="L3108" class="blob-num js-line-number" data-line-number="3108"></td>
-        <td id="LC3108" class="blob-code js-file-line">    <span class="pl-s3">mpc_tok_parens</span>(Grammar, mpc_soft_delete)</td>
-      </tr>
-      <tr>
-        <td id="L3109" class="blob-num js-line-number" data-line-number="3109"></td>
-        <td id="LC3109" class="blob-code js-file-line">  ));</td>
-      </tr>
-      <tr>
-        <td id="L3110" class="blob-num js-line-number" data-line-number="3110"></td>
-        <td id="LC3110" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3111" class="blob-num js-line-number" data-line-number="3111"></td>
-        <td id="LC3111" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3112" class="blob-num js-line-number" data-line-number="3112"></td>
-        <td id="LC3112" class="blob-code js-file-line">  <span class="pl-k">if</span> (!<span class="pl-s3">mpc_parse_input</span>(i, Lang, &amp;r)) {</td>
-      </tr>
-      <tr>
-        <td id="L3113" class="blob-num js-line-number" data-line-number="3113"></td>
-        <td id="LC3113" class="blob-code js-file-line">    e = r.<span class="pl-vo">error</span>;</td>
-      </tr>
-      <tr>
-        <td id="L3114" class="blob-num js-line-number" data-line-number="3114"></td>
-        <td id="LC3114" class="blob-code js-file-line">  } <span class="pl-k">else</span> {</td>
-      </tr>
-      <tr>
-        <td id="L3115" class="blob-num js-line-number" data-line-number="3115"></td>
-        <td id="LC3115" class="blob-code js-file-line">    e = <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L3116" class="blob-num js-line-number" data-line-number="3116"></td>
-        <td id="LC3116" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L3117" class="blob-num js-line-number" data-line-number="3117"></td>
-        <td id="LC3117" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3118" class="blob-num js-line-number" data-line-number="3118"></td>
-        <td id="LC3118" class="blob-code js-file-line">  <span class="pl-s3">mpc_cleanup</span>(<span class="pl-c1">6</span>, Lang, Stmt, Grammar, Term, Factor, Base);</td>
-      </tr>
-      <tr>
-        <td id="L3119" class="blob-num js-line-number" data-line-number="3119"></td>
-        <td id="LC3119" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3120" class="blob-num js-line-number" data-line-number="3120"></td>
-        <td id="LC3120" class="blob-code js-file-line">  <span class="pl-k">return</span> e;</td>
-      </tr>
-      <tr>
-        <td id="L3121" class="blob-num js-line-number" data-line-number="3121"></td>
-        <td id="LC3121" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L3122" class="blob-num js-line-number" data-line-number="3122"></td>
-        <td id="LC3122" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L3123" class="blob-num js-line-number" data-line-number="3123"></td>
-        <td id="LC3123" class="blob-code js-file-line"><span class="pl-s3">mpc_err_t</span> *<span class="pl-en">mpca_lang_file</span>(<span class="pl-st">int</span> flags, <span class="pl-s3">FILE</span> *f, ...) {</td>
-      </tr>
-      <tr>
-        <td id="L3124" class="blob-num js-line-number" data-line-number="3124"></td>
-        <td id="LC3124" class="blob-code js-file-line">  <span class="pl-s3">mpca_grammar_st_t</span> st;</td>
-      </tr>
-      <tr>
-        <td id="L3125" class="blob-num js-line-number" data-line-number="3125"></td>
-        <td id="LC3125" class="blob-code js-file-line">  <span class="pl-s3">mpc_input_t</span> *i;</td>
-      </tr>
-      <tr>
-        <td id="L3126" class="blob-num js-line-number" data-line-number="3126"></td>
-        <td id="LC3126" class="blob-code js-file-line">  <span class="pl-s3">mpc_err_t</span> *err;</td>
-      </tr>
-      <tr>
-        <td id="L3127" class="blob-num js-line-number" data-line-number="3127"></td>
-        <td id="LC3127" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L3128" class="blob-num js-line-number" data-line-number="3128"></td>
-        <td id="LC3128" class="blob-code js-file-line">  <span class="pl-s3">va_list</span> va;  </td>
-      </tr>
-      <tr>
-        <td id="L3129" class="blob-num js-line-number" data-line-number="3129"></td>
-        <td id="LC3129" class="blob-code js-file-line">  <span class="pl-s3">va_start</span>(va, f);</td>
-      </tr>
-      <tr>
-        <td id="L3130" class="blob-num js-line-number" data-line-number="3130"></td>
-        <td id="LC3130" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3131" class="blob-num js-line-number" data-line-number="3131"></td>
-        <td id="LC3131" class="blob-code js-file-line">  st.<span class="pl-vo">va</span> = &amp;va;</td>
-      </tr>
-      <tr>
-        <td id="L3132" class="blob-num js-line-number" data-line-number="3132"></td>
-        <td id="LC3132" class="blob-code js-file-line">  st.<span class="pl-vo">parsers_num</span> = <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L3133" class="blob-num js-line-number" data-line-number="3133"></td>
-        <td id="LC3133" class="blob-code js-file-line">  st.<span class="pl-vo">parsers</span> = <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L3134" class="blob-num js-line-number" data-line-number="3134"></td>
-        <td id="LC3134" class="blob-code js-file-line">  st.<span class="pl-vo">flags</span> = flags;</td>
-      </tr>
-      <tr>
-        <td id="L3135" class="blob-num js-line-number" data-line-number="3135"></td>
-        <td id="LC3135" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3136" class="blob-num js-line-number" data-line-number="3136"></td>
-        <td id="LC3136" class="blob-code js-file-line">  i = <span class="pl-s3">mpc_input_new_file</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>&lt;mpca_lang_file&gt;<span class="pl-pds">&quot;</span></span>, f);</td>
-      </tr>
-      <tr>
-        <td id="L3137" class="blob-num js-line-number" data-line-number="3137"></td>
-        <td id="LC3137" class="blob-code js-file-line">  err = <span class="pl-s3">mpca_lang_st</span>(i, &amp;st);</td>
-      </tr>
-      <tr>
-        <td id="L3138" class="blob-num js-line-number" data-line-number="3138"></td>
-        <td id="LC3138" class="blob-code js-file-line">  <span class="pl-s3">mpc_input_delete</span>(i);</td>
-      </tr>
-      <tr>
-        <td id="L3139" class="blob-num js-line-number" data-line-number="3139"></td>
-        <td id="LC3139" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3140" class="blob-num js-line-number" data-line-number="3140"></td>
-        <td id="LC3140" class="blob-code js-file-line">  <span class="pl-s3">free</span>(st.<span class="pl-vo">parsers</span>);</td>
-      </tr>
-      <tr>
-        <td id="L3141" class="blob-num js-line-number" data-line-number="3141"></td>
-        <td id="LC3141" class="blob-code js-file-line">  <span class="pl-s3">va_end</span>(va);</td>
-      </tr>
-      <tr>
-        <td id="L3142" class="blob-num js-line-number" data-line-number="3142"></td>
-        <td id="LC3142" class="blob-code js-file-line">  <span class="pl-k">return</span> err;</td>
-      </tr>
-      <tr>
-        <td id="L3143" class="blob-num js-line-number" data-line-number="3143"></td>
-        <td id="LC3143" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L3144" class="blob-num js-line-number" data-line-number="3144"></td>
-        <td id="LC3144" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L3145" class="blob-num js-line-number" data-line-number="3145"></td>
-        <td id="LC3145" class="blob-code js-file-line"><span class="pl-s3">mpc_err_t</span> *<span class="pl-en">mpca_lang_pipe</span>(<span class="pl-st">int</span> flags, <span class="pl-s3">FILE</span> *p, ...) {</td>
-      </tr>
-      <tr>
-        <td id="L3146" class="blob-num js-line-number" data-line-number="3146"></td>
-        <td id="LC3146" class="blob-code js-file-line">  <span class="pl-s3">mpca_grammar_st_t</span> st;</td>
-      </tr>
-      <tr>
-        <td id="L3147" class="blob-num js-line-number" data-line-number="3147"></td>
-        <td id="LC3147" class="blob-code js-file-line">  <span class="pl-s3">mpc_input_t</span> *i;</td>
-      </tr>
-      <tr>
-        <td id="L3148" class="blob-num js-line-number" data-line-number="3148"></td>
-        <td id="LC3148" class="blob-code js-file-line">  <span class="pl-s3">mpc_err_t</span> *err;</td>
-      </tr>
-      <tr>
-        <td id="L3149" class="blob-num js-line-number" data-line-number="3149"></td>
-        <td id="LC3149" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L3150" class="blob-num js-line-number" data-line-number="3150"></td>
-        <td id="LC3150" class="blob-code js-file-line">  <span class="pl-s3">va_list</span> va;  </td>
-      </tr>
-      <tr>
-        <td id="L3151" class="blob-num js-line-number" data-line-number="3151"></td>
-        <td id="LC3151" class="blob-code js-file-line">  <span class="pl-s3">va_start</span>(va, p);</td>
-      </tr>
-      <tr>
-        <td id="L3152" class="blob-num js-line-number" data-line-number="3152"></td>
-        <td id="LC3152" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3153" class="blob-num js-line-number" data-line-number="3153"></td>
-        <td id="LC3153" class="blob-code js-file-line">  st.<span class="pl-vo">va</span> = &amp;va;</td>
-      </tr>
-      <tr>
-        <td id="L3154" class="blob-num js-line-number" data-line-number="3154"></td>
-        <td id="LC3154" class="blob-code js-file-line">  st.<span class="pl-vo">parsers_num</span> = <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L3155" class="blob-num js-line-number" data-line-number="3155"></td>
-        <td id="LC3155" class="blob-code js-file-line">  st.<span class="pl-vo">parsers</span> = <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L3156" class="blob-num js-line-number" data-line-number="3156"></td>
-        <td id="LC3156" class="blob-code js-file-line">  st.<span class="pl-vo">flags</span> = flags;</td>
-      </tr>
-      <tr>
-        <td id="L3157" class="blob-num js-line-number" data-line-number="3157"></td>
-        <td id="LC3157" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3158" class="blob-num js-line-number" data-line-number="3158"></td>
-        <td id="LC3158" class="blob-code js-file-line">  i = <span class="pl-s3">mpc_input_new_pipe</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>&lt;mpca_lang_pipe&gt;<span class="pl-pds">&quot;</span></span>, p);</td>
-      </tr>
-      <tr>
-        <td id="L3159" class="blob-num js-line-number" data-line-number="3159"></td>
-        <td id="LC3159" class="blob-code js-file-line">  err = <span class="pl-s3">mpca_lang_st</span>(i, &amp;st);</td>
-      </tr>
-      <tr>
-        <td id="L3160" class="blob-num js-line-number" data-line-number="3160"></td>
-        <td id="LC3160" class="blob-code js-file-line">  <span class="pl-s3">mpc_input_delete</span>(i);</td>
-      </tr>
-      <tr>
-        <td id="L3161" class="blob-num js-line-number" data-line-number="3161"></td>
-        <td id="LC3161" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3162" class="blob-num js-line-number" data-line-number="3162"></td>
-        <td id="LC3162" class="blob-code js-file-line">  <span class="pl-s3">free</span>(st.<span class="pl-vo">parsers</span>);</td>
-      </tr>
-      <tr>
-        <td id="L3163" class="blob-num js-line-number" data-line-number="3163"></td>
-        <td id="LC3163" class="blob-code js-file-line">  <span class="pl-s3">va_end</span>(va);</td>
-      </tr>
-      <tr>
-        <td id="L3164" class="blob-num js-line-number" data-line-number="3164"></td>
-        <td id="LC3164" class="blob-code js-file-line">  <span class="pl-k">return</span> err;</td>
-      </tr>
-      <tr>
-        <td id="L3165" class="blob-num js-line-number" data-line-number="3165"></td>
-        <td id="LC3165" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L3166" class="blob-num js-line-number" data-line-number="3166"></td>
-        <td id="LC3166" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L3167" class="blob-num js-line-number" data-line-number="3167"></td>
-        <td id="LC3167" class="blob-code js-file-line"><span class="pl-s3">mpc_err_t</span> *<span class="pl-en">mpca_lang</span>(<span class="pl-st">int</span> flags, <span class="pl-s">const</span> <span class="pl-st">char</span> *language, ...) {</td>
-      </tr>
-      <tr>
-        <td id="L3168" class="blob-num js-line-number" data-line-number="3168"></td>
-        <td id="LC3168" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3169" class="blob-num js-line-number" data-line-number="3169"></td>
-        <td id="LC3169" class="blob-code js-file-line">  <span class="pl-s3">mpca_grammar_st_t</span> st;</td>
-      </tr>
-      <tr>
-        <td id="L3170" class="blob-num js-line-number" data-line-number="3170"></td>
-        <td id="LC3170" class="blob-code js-file-line">  <span class="pl-s3">mpc_input_t</span> *i;</td>
-      </tr>
-      <tr>
-        <td id="L3171" class="blob-num js-line-number" data-line-number="3171"></td>
-        <td id="LC3171" class="blob-code js-file-line">  <span class="pl-s3">mpc_err_t</span> *err;</td>
-      </tr>
-      <tr>
-        <td id="L3172" class="blob-num js-line-number" data-line-number="3172"></td>
-        <td id="LC3172" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3173" class="blob-num js-line-number" data-line-number="3173"></td>
-        <td id="LC3173" class="blob-code js-file-line">  <span class="pl-s3">va_list</span> va;  </td>
-      </tr>
-      <tr>
-        <td id="L3174" class="blob-num js-line-number" data-line-number="3174"></td>
-        <td id="LC3174" class="blob-code js-file-line">  <span class="pl-s3">va_start</span>(va, language);</td>
-      </tr>
-      <tr>
-        <td id="L3175" class="blob-num js-line-number" data-line-number="3175"></td>
-        <td id="LC3175" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3176" class="blob-num js-line-number" data-line-number="3176"></td>
-        <td id="LC3176" class="blob-code js-file-line">  st.<span class="pl-vo">va</span> = &amp;va;</td>
-      </tr>
-      <tr>
-        <td id="L3177" class="blob-num js-line-number" data-line-number="3177"></td>
-        <td id="LC3177" class="blob-code js-file-line">  st.<span class="pl-vo">parsers_num</span> = <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L3178" class="blob-num js-line-number" data-line-number="3178"></td>
-        <td id="LC3178" class="blob-code js-file-line">  st.<span class="pl-vo">parsers</span> = <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L3179" class="blob-num js-line-number" data-line-number="3179"></td>
-        <td id="LC3179" class="blob-code js-file-line">  st.<span class="pl-vo">flags</span> = flags;</td>
-      </tr>
-      <tr>
-        <td id="L3180" class="blob-num js-line-number" data-line-number="3180"></td>
-        <td id="LC3180" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3181" class="blob-num js-line-number" data-line-number="3181"></td>
-        <td id="LC3181" class="blob-code js-file-line">  i = <span class="pl-s3">mpc_input_new_string</span>(<span class="pl-s1"><span class="pl-pds">&quot;</span>&lt;mpca_lang&gt;<span class="pl-pds">&quot;</span></span>, language);</td>
-      </tr>
-      <tr>
-        <td id="L3182" class="blob-num js-line-number" data-line-number="3182"></td>
-        <td id="LC3182" class="blob-code js-file-line">  err = <span class="pl-s3">mpca_lang_st</span>(i, &amp;st);</td>
-      </tr>
-      <tr>
-        <td id="L3183" class="blob-num js-line-number" data-line-number="3183"></td>
-        <td id="LC3183" class="blob-code js-file-line">  <span class="pl-s3">mpc_input_delete</span>(i);</td>
-      </tr>
-      <tr>
-        <td id="L3184" class="blob-num js-line-number" data-line-number="3184"></td>
-        <td id="LC3184" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3185" class="blob-num js-line-number" data-line-number="3185"></td>
-        <td id="LC3185" class="blob-code js-file-line">  <span class="pl-s3">free</span>(st.<span class="pl-vo">parsers</span>);</td>
-      </tr>
-      <tr>
-        <td id="L3186" class="blob-num js-line-number" data-line-number="3186"></td>
-        <td id="LC3186" class="blob-code js-file-line">  <span class="pl-s3">va_end</span>(va);</td>
-      </tr>
-      <tr>
-        <td id="L3187" class="blob-num js-line-number" data-line-number="3187"></td>
-        <td id="LC3187" class="blob-code js-file-line">  <span class="pl-k">return</span> err;</td>
-      </tr>
-      <tr>
-        <td id="L3188" class="blob-num js-line-number" data-line-number="3188"></td>
-        <td id="LC3188" class="blob-code js-file-line">}</td>
-      </tr>
-      <tr>
-        <td id="L3189" class="blob-num js-line-number" data-line-number="3189"></td>
-        <td id="LC3189" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L3190" class="blob-num js-line-number" data-line-number="3190"></td>
-        <td id="LC3190" class="blob-code js-file-line"><span class="pl-s3">mpc_err_t</span> *<span class="pl-en">mpca_lang_contents</span>(<span class="pl-st">int</span> flags, <span class="pl-s">const</span> <span class="pl-st">char</span> *filename, ...) {</td>
-      </tr>
-      <tr>
-        <td id="L3191" class="blob-num js-line-number" data-line-number="3191"></td>
-        <td id="LC3191" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3192" class="blob-num js-line-number" data-line-number="3192"></td>
-        <td id="LC3192" class="blob-code js-file-line">  <span class="pl-s3">mpca_grammar_st_t</span> st;</td>
-      </tr>
-      <tr>
-        <td id="L3193" class="blob-num js-line-number" data-line-number="3193"></td>
-        <td id="LC3193" class="blob-code js-file-line">  <span class="pl-s3">mpc_input_t</span> *i;</td>
-      </tr>
-      <tr>
-        <td id="L3194" class="blob-num js-line-number" data-line-number="3194"></td>
-        <td id="LC3194" class="blob-code js-file-line">  <span class="pl-s3">mpc_err_t</span> *err;</td>
-      </tr>
-      <tr>
-        <td id="L3195" class="blob-num js-line-number" data-line-number="3195"></td>
-        <td id="LC3195" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3196" class="blob-num js-line-number" data-line-number="3196"></td>
-        <td id="LC3196" class="blob-code js-file-line">  <span class="pl-s3">va_list</span> va;</td>
-      </tr>
-      <tr>
-        <td id="L3197" class="blob-num js-line-number" data-line-number="3197"></td>
-        <td id="LC3197" class="blob-code js-file-line">
-</td>
-      </tr>
-      <tr>
-        <td id="L3198" class="blob-num js-line-number" data-line-number="3198"></td>
-        <td id="LC3198" class="blob-code js-file-line">  <span class="pl-s3">FILE</span> *f = <span class="pl-s3">fopen</span>(filename, <span class="pl-s1"><span class="pl-pds">&quot;</span>rb<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L3199" class="blob-num js-line-number" data-line-number="3199"></td>
-        <td id="LC3199" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3200" class="blob-num js-line-number" data-line-number="3200"></td>
-        <td id="LC3200" class="blob-code js-file-line">  <span class="pl-k">if</span> (f == <span class="pl-c1">NULL</span>) {</td>
-      </tr>
-      <tr>
-        <td id="L3201" class="blob-num js-line-number" data-line-number="3201"></td>
-        <td id="LC3201" class="blob-code js-file-line">    <span class="pl-k">return</span> <span class="pl-s3">mpc_err_fail</span>(filename, <span class="pl-s3">mpc_state_new</span>(), <span class="pl-s1"><span class="pl-pds">&quot;</span>Unable to open file!<span class="pl-pds">&quot;</span></span>);</td>
-      </tr>
-      <tr>
-        <td id="L3202" class="blob-num js-line-number" data-line-number="3202"></td>
-        <td id="LC3202" class="blob-code js-file-line">  }</td>
-      </tr>
-      <tr>
-        <td id="L3203" class="blob-num js-line-number" data-line-number="3203"></td>
-        <td id="LC3203" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3204" class="blob-num js-line-number" data-line-number="3204"></td>
-        <td id="LC3204" class="blob-code js-file-line">  <span class="pl-s3">va_start</span>(va, filename);</td>
-      </tr>
-      <tr>
-        <td id="L3205" class="blob-num js-line-number" data-line-number="3205"></td>
-        <td id="LC3205" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3206" class="blob-num js-line-number" data-line-number="3206"></td>
-        <td id="LC3206" class="blob-code js-file-line">  st.<span class="pl-vo">va</span> = &amp;va;</td>
-      </tr>
-      <tr>
-        <td id="L3207" class="blob-num js-line-number" data-line-number="3207"></td>
-        <td id="LC3207" class="blob-code js-file-line">  st.<span class="pl-vo">parsers_num</span> = <span class="pl-c1">0</span>;</td>
-      </tr>
-      <tr>
-        <td id="L3208" class="blob-num js-line-number" data-line-number="3208"></td>
-        <td id="LC3208" class="blob-code js-file-line">  st.<span class="pl-vo">parsers</span> = <span class="pl-c1">NULL</span>;</td>
-      </tr>
-      <tr>
-        <td id="L3209" class="blob-num js-line-number" data-line-number="3209"></td>
-        <td id="LC3209" class="blob-code js-file-line">  st.<span class="pl-vo">flags</span> = flags;</td>
-      </tr>
-      <tr>
-        <td id="L3210" class="blob-num js-line-number" data-line-number="3210"></td>
-        <td id="LC3210" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3211" class="blob-num js-line-number" data-line-number="3211"></td>
-        <td id="LC3211" class="blob-code js-file-line">  i = <span class="pl-s3">mpc_input_new_file</span>(filename, f);</td>
-      </tr>
-      <tr>
-        <td id="L3212" class="blob-num js-line-number" data-line-number="3212"></td>
-        <td id="LC3212" class="blob-code js-file-line">  err = <span class="pl-s3">mpca_lang_st</span>(i, &amp;st);</td>
-      </tr>
-      <tr>
-        <td id="L3213" class="blob-num js-line-number" data-line-number="3213"></td>
-        <td id="LC3213" class="blob-code js-file-line">  <span class="pl-s3">mpc_input_delete</span>(i);</td>
-      </tr>
-      <tr>
-        <td id="L3214" class="blob-num js-line-number" data-line-number="3214"></td>
-        <td id="LC3214" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3215" class="blob-num js-line-number" data-line-number="3215"></td>
-        <td id="LC3215" class="blob-code js-file-line">  <span class="pl-s3">free</span>(st.<span class="pl-vo">parsers</span>);</td>
-      </tr>
-      <tr>
-        <td id="L3216" class="blob-num js-line-number" data-line-number="3216"></td>
-        <td id="LC3216" class="blob-code js-file-line">  <span class="pl-s3">va_end</span>(va);  </td>
-      </tr>
-      <tr>
-        <td id="L3217" class="blob-num js-line-number" data-line-number="3217"></td>
-        <td id="LC3217" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3218" class="blob-num js-line-number" data-line-number="3218"></td>
-        <td id="LC3218" class="blob-code js-file-line">  <span class="pl-s3">fclose</span>(f);</td>
-      </tr>
-      <tr>
-        <td id="L3219" class="blob-num js-line-number" data-line-number="3219"></td>
-        <td id="LC3219" class="blob-code js-file-line">  </td>
-      </tr>
-      <tr>
-        <td id="L3220" class="blob-num js-line-number" data-line-number="3220"></td>
-        <td id="LC3220" class="blob-code js-file-line">  <span class="pl-k">return</span> err;</td>
-      </tr>
-      <tr>
-        <td id="L3221" class="blob-num js-line-number" data-line-number="3221"></td>
-        <td id="LC3221" class="blob-code js-file-line">}</td>
-      </tr>
-</table>
-
-  </div>
-
-  </div>
-</div>
-
-<a href="#jump-to-line" rel="facebox[.linejump]" data-hotkey="l" style="display:none">Jump to Line</a>
-<div id="jump-to-line" style="display:none">
-  <form accept-charset="UTF-8" class="js-jump-to-line-form">
-    <input class="linejump-input js-jump-to-line-field" type="text" placeholder="Jump to line&hellip;" autofocus>
-    <button type="submit" class="button">Go</button>
-  </form>
-</div>
-
-        </div>
-
-      </div><!-- /.repo-container -->
-      <div class="modal-backdrop"></div>
-    </div><!-- /.container -->
-  </div><!-- /.site -->
-
-
-    </div><!-- /.wrapper -->
-
-      <div class="container">
-  <div class="site-footer" role="contentinfo">
-    <ul class="site-footer-links right">
-      <li><a href="https://status.github.com/">Status</a></li>
-      <li><a href="https://developer.github.com">API</a></li>
-      <li><a href="http://training.github.com">Training</a></li>
-      <li><a href="http://shop.github.com">Shop</a></li>
-      <li><a href="/blog">Blog</a></li>
-      <li><a href="/about">About</a></li>
-
-    </ul>
-
-    <a href="/" aria-label="Homepage">
-      <span class="mega-octicon octicon-mark-github" title="GitHub"></span>
-    </a>
-
-    <ul class="site-footer-links">
-      <li>&copy; 2014 <span title="0.12511s from github-fe121-cp1-prd.iad.github.net">GitHub</span>, Inc.</li>
-        <li><a href="/site/terms">Terms</a></li>
-        <li><a href="/site/privacy">Privacy</a></li>
-        <li><a href="/security">Security</a></li>
-        <li><a href="/contact">Contact</a></li>
-    </ul>
-  </div><!-- /.site-footer -->
-</div><!-- /.container -->
-
-
-    <div class="fullscreen-overlay js-fullscreen-overlay" id="fullscreen_overlay">
-  <div class="fullscreen-container js-suggester-container">
-    <div class="textarea-wrap">
-      <textarea name="fullscreen-contents" id="fullscreen-contents" class="fullscreen-contents js-fullscreen-contents js-suggester-field" placeholder=""></textarea>
-    </div>
-  </div>
-  <div class="fullscreen-sidebar">
-    <a href="#" class="exit-fullscreen js-exit-fullscreen tooltipped tooltipped-w" aria-label="Exit Zen Mode">
-      <span class="mega-octicon octicon-screen-normal"></span>
-    </a>
-    <a href="#" class="theme-switcher js-theme-switcher tooltipped tooltipped-w"
-      aria-label="Switch themes">
-      <span class="octicon octicon-color-mode"></span>
-    </a>
-  </div>
-</div>
-
-
-
-    <div id="ajax-error-message" class="flash flash-error">
-      <span class="octicon octicon-alert"></span>
-      <a href="#" class="octicon octicon-x flash-close js-ajax-error-dismiss" aria-label="Dismiss error"></a>
-      Something went wrong with that request. Please try again.
-    </div>
-
-
-      <script crossorigin="anonymous" src="https://assets-cdn.github.com/assets/frameworks-2d727fed4d969b14b28165c75ad12d7dddd56c0198fa70cedc3fdad7ac395b2c.js" type="text/javascript"></script>
-      <script async="async" crossorigin="anonymous" src="https://assets-cdn.github.com/assets/github-f3e9a2204fcfc6f7dde250e61ca35353411880024102cba14a0bd45f05f1e74f.js" type="text/javascript"></script>
+        if (p->data.or.n == 0) { MPC_SUCCESS(NULL); }
+        
+        if (st == 0) { MPC_CONTINUE(st+1, p->data.or.xs[st]); }
+        if (st <= p->data.or.n) {
+          if (mpc_stack_peekr(stk, &r)) {
+            mpc_stack_popr(stk, &r);
+            mpc_stack_popr_err(stk, st-1);
+            MPC_SUCCESS(r.output);
+          }
+          if (st <  p->data.or.n) { MPC_CONTINUE(st+1, p->data.or.xs[st]); }
+          if (st == p->data.or.n) { MPC_FAILURE(mpc_stack_merger_err(stk, p->data.or.n)); }
+        }
       
+      case MPC_TYPE_AND:
+        
+        if (p->data.or.n == 0) { MPC_SUCCESS(p->data.and.f(0, NULL)); }
+        
+        if (st == 0) { mpc_input_mark(i); MPC_CONTINUE(st+1, p->data.and.xs[st]); }
+        if (st <= p->data.and.n) {
+          if (!mpc_stack_peekr(stk, &r)) {
+            mpc_input_rewind(i);
+            mpc_stack_popr(stk, &r);
+            mpc_stack_popr_out(stk, st-1, p->data.and.dxs);
+            MPC_FAILURE(r.error);
+          }
+          if (st <  p->data.and.n) { MPC_CONTINUE(st+1, p->data.and.xs[st]); }
+          if (st == p->data.and.n) { mpc_input_unmark(i); MPC_SUCCESS(mpc_stack_merger_out(stk, p->data.and.n, p->data.and.f)); }
+        }
       
-  </body>
-</html>
+      /* End */
+      
+      default:
+        
+        MPC_FAILURE(mpc_err_fail(i->filename, i->state, "Unknown Parser Type Id!"));
+    }
+  }
+  
+  return mpc_stack_terminate(stk, final);
+  
+}
 
+#undef MPC_CONTINUE
+#undef MPC_SUCCESS
+#undef MPC_FAILURE
+#undef MPC_PRIMATIVE
+
+int mpc_parse(const char *filename, const char *string, mpc_parser_t *p, mpc_result_t *r) {
+  int x;
+  mpc_input_t *i = mpc_input_new_string(filename, string);
+  x = mpc_parse_input(i, p, r);
+  mpc_input_delete(i);
+  return x;
+}
+
+int mpc_parse_file(const char *filename, FILE *file, mpc_parser_t *p, mpc_result_t *r) {
+  int x;
+  mpc_input_t *i = mpc_input_new_file(filename, file);
+  x = mpc_parse_input(i, p, r);
+  mpc_input_delete(i);
+  return x;
+}
+
+int mpc_parse_pipe(const char *filename, FILE *pipe, mpc_parser_t *p, mpc_result_t *r) {
+  int x;
+  mpc_input_t *i = mpc_input_new_pipe(filename, pipe);
+  x = mpc_parse_input(i, p, r);
+  mpc_input_delete(i);
+  return x;
+}
+
+int mpc_parse_contents(const char *filename, mpc_parser_t *p, mpc_result_t *r) {
+  
+  FILE *f = fopen(filename, "rb");
+  int res;
+  
+  if (f == NULL) {
+    r->output = NULL;
+    r->error = mpc_err_fail(filename, mpc_state_new(), "Unable to open file!");
+    return 0;
+  }
+  
+  res = mpc_parse_file(filename, f, p, r);
+  fclose(f);
+  return res;
+}
+
+/*
+** Building a Parser
+*/
+
+static void mpc_undefine_unretained(mpc_parser_t *p, int force);
+
+static void mpc_undefine_or(mpc_parser_t *p) {
+  
+  int i;
+  for (i = 0; i < p->data.or.n; i++) {
+    mpc_undefine_unretained(p->data.or.xs[i], 0);
+  }
+  free(p->data.or.xs);
+  
+}
+
+static void mpc_undefine_and(mpc_parser_t *p) {
+  
+  int i;
+  for (i = 0; i < p->data.and.n; i++) {
+    mpc_undefine_unretained(p->data.and.xs[i], 0);
+  }
+  free(p->data.and.xs);
+  free(p->data.and.dxs);
+  
+}
+
+static void mpc_undefine_unretained(mpc_parser_t *p, int force) {
+  
+  if (p->retained && !force) { return; }
+  
+  switch (p->type) {
+    
+    case MPC_TYPE_FAIL: free(p->data.fail.m); break;
+    
+    case MPC_TYPE_ONEOF: 
+    case MPC_TYPE_NONEOF:
+    case MPC_TYPE_STRING:
+      free(p->data.string.x); 
+      break;
+    
+    case MPC_TYPE_APPLY:    mpc_undefine_unretained(p->data.apply.x, 0);    break;
+    case MPC_TYPE_APPLY_TO: mpc_undefine_unretained(p->data.apply_to.x, 0); break;
+    case MPC_TYPE_PREDICT:  mpc_undefine_unretained(p->data.predict.x, 0);  break;
+    
+    case MPC_TYPE_MAYBE:
+    case MPC_TYPE_NOT:
+      mpc_undefine_unretained(p->data.not.x, 0);
+      break;
+    
+    case MPC_TYPE_EXPECT:
+      mpc_undefine_unretained(p->data.expect.x, 0);
+      free(p->data.expect.m);
+      break;
+      
+    case MPC_TYPE_MANY:
+    case MPC_TYPE_MANY1:
+    case MPC_TYPE_COUNT:
+      mpc_undefine_unretained(p->data.repeat.x, 0);
+      break;
+    
+    case MPC_TYPE_OR:  mpc_undefine_or(p);  break;
+    case MPC_TYPE_AND: mpc_undefine_and(p); break;
+    
+    default: break;
+  }
+  
+  if (!force) {
+    free(p->name);
+    free(p);
+  }
+  
+}
+
+void mpc_delete(mpc_parser_t *p) {
+  if (p->retained) {
+
+    if (p->type != MPC_TYPE_UNDEFINED) {
+      mpc_undefine_unretained(p, 0);
+    } 
+    
+    free(p->name);
+    free(p);
+  
+  } else {
+    mpc_undefine_unretained(p, 0);  
+  }
+}
+
+static void mpc_soft_delete(mpc_val_t *x) {
+  mpc_undefine_unretained(x, 0);
+}
+
+static mpc_parser_t *mpc_undefined(void) {
+  mpc_parser_t *p = calloc(1, sizeof(mpc_parser_t));
+  p->retained = 0;
+  p->type = MPC_TYPE_UNDEFINED;
+  p->name = NULL;
+  return p;
+}
+
+mpc_parser_t *mpc_new(const char *name) {
+  mpc_parser_t *p = mpc_undefined();
+  p->retained = 1;
+  p->name = realloc(p->name, strlen(name) + 1);
+  strcpy(p->name, name);
+  return p;
+}
+
+mpc_parser_t *mpc_undefine(mpc_parser_t *p) {
+  mpc_undefine_unretained(p, 1);
+  p->type = MPC_TYPE_UNDEFINED;
+  return p;
+}
+
+mpc_parser_t *mpc_define(mpc_parser_t *p, mpc_parser_t *a) {
+  
+  if (p->retained) {
+    p->type = a->type;
+    p->data = a->data;
+  } else {
+    mpc_parser_t *a2 = mpc_failf("Attempt to assign to Unretained Parser!");
+    p->type = a2->type;
+    p->data = a2->data;
+    free(a2);
+  }
+  
+  free(a);
+  return p;  
+}
+
+void mpc_cleanup(int n, ...) {
+  int i;
+  mpc_parser_t **list = malloc(sizeof(mpc_parser_t*) * n);
+  
+  va_list va;
+  va_start(va, n);
+  for (i = 0; i < n; i++) { list[i] = va_arg(va, mpc_parser_t*); }
+  for (i = 0; i < n; i++) { mpc_undefine(list[i]); }
+  for (i = 0; i < n; i++) { mpc_delete(list[i]); }  
+  va_end(va);  
+
+  free(list);
+}
+
+mpc_parser_t *mpc_pass(void) {
+  mpc_parser_t *p = mpc_undefined();
+  p->type = MPC_TYPE_PASS;
+  return p;
+}
+
+mpc_parser_t *mpc_fail(const char *m) {
+  mpc_parser_t *p = mpc_undefined();
+  p->type = MPC_TYPE_FAIL;
+  p->data.fail.m = malloc(strlen(m) + 1);
+  strcpy(p->data.fail.m, m);
+  return p;
+}
+
+/*
+** As `snprintf` is not ANSI standard this 
+** function `mpc_failf` should be considered
+** unsafe.
+**
+** You have a few options if this is going to be
+** trouble.
+**
+** - Ensure the format string does not exceed
+**   the buffer length using precision specifiers
+**   such as `%.512s`.
+**
+** - Patch this function in your code base to 
+**   use `snprintf` or whatever variant your
+**   system supports.
+**
+** - Avoid it altogether.
+**
+*/
+
+mpc_parser_t *mpc_failf(const char *fmt, ...) {
+  
+  va_list va;
+  char *buffer;
+
+  mpc_parser_t *p = mpc_undefined();
+  p->type = MPC_TYPE_FAIL;
+  
+  va_start(va, fmt);
+  buffer = malloc(2048);
+  vsprintf(buffer, fmt, va);
+  va_end(va);
+  
+  buffer = realloc(buffer, strlen(buffer) + 1);
+  p->data.fail.m = buffer;
+  return p;
+
+}
+
+mpc_parser_t *mpc_lift_val(mpc_val_t *x) {
+  mpc_parser_t *p = mpc_undefined();
+  p->type = MPC_TYPE_LIFT_VAL;
+  p->data.lift.x = x;
+  return p;
+}
+
+mpc_parser_t *mpc_lift(mpc_ctor_t lf) {
+  mpc_parser_t *p = mpc_undefined();
+  p->type = MPC_TYPE_LIFT;
+  p->data.lift.lf = lf;
+  return p;
+}
+
+mpc_parser_t *mpc_anchor(int(*f)(char,char)) {
+  mpc_parser_t *p = mpc_undefined();
+  p->type = MPC_TYPE_ANCHOR;
+  p->data.anchor.f = f;
+  return p;
+}
+
+mpc_parser_t *mpc_state(void) {
+  mpc_parser_t *p = mpc_undefined();
+  p->type = MPC_TYPE_STATE;
+  return p;
+}
+
+mpc_parser_t *mpc_expect(mpc_parser_t *a, const char *expected) {
+  mpc_parser_t *p = mpc_undefined();
+  p->type = MPC_TYPE_EXPECT;
+  p->data.expect.x = a;
+  p->data.expect.m = malloc(strlen(expected) + 1);
+  strcpy(p->data.expect.m, expected);
+  return p;
+}
+
+/*
+** As `snprintf` is not ANSI standard this 
+** function `mpc_expectf` should be considered
+** unsafe.
+**
+** You have a few options if this is going to be
+** trouble.
+**
+** - Ensure the format string does not exceed
+**   the buffer length using precision specifiers
+**   such as `%.512s`.
+**
+** - Patch this function in your code base to 
+**   use `snprintf` or whatever variant your
+**   system supports.
+**
+** - Avoid it altogether.
+**
+*/
+
+mpc_parser_t *mpc_expectf(mpc_parser_t *a, const char *fmt, ...) {
+  va_list va;
+  char *buffer;
+
+  mpc_parser_t *p = mpc_undefined();
+  p->type = MPC_TYPE_EXPECT;
+  
+  va_start(va, fmt);
+  buffer = malloc(2048);
+  vsprintf(buffer, fmt, va);
+  va_end(va);
+  
+  buffer = realloc(buffer, strlen(buffer) + 1);
+  p->data.expect.x = a;
+  p->data.expect.m = buffer;
+  return p;
+}
+
+/*
+** Basic Parsers
+*/
+
+mpc_parser_t *mpc_any(void) {
+  mpc_parser_t *p = mpc_undefined();
+  p->type = MPC_TYPE_ANY;
+  return mpc_expect(p, "any character");
+}
+
+mpc_parser_t *mpc_char(char c) {
+  mpc_parser_t *p = mpc_undefined();
+  p->type = MPC_TYPE_SINGLE;
+  p->data.single.x = c;
+  return mpc_expectf(p, "'%c'", c);
+}
+
+mpc_parser_t *mpc_range(char s, char e) {
+  mpc_parser_t *p = mpc_undefined();
+  p->type = MPC_TYPE_RANGE;
+  p->data.range.x = s;
+  p->data.range.y = e;
+  return mpc_expectf(p, "character between '%c' and '%c'", s, e);
+}
+
+mpc_parser_t *mpc_oneof(const char *s) {
+  mpc_parser_t *p = mpc_undefined();
+  p->type = MPC_TYPE_ONEOF;
+  p->data.string.x = malloc(strlen(s) + 1);
+  strcpy(p->data.string.x, s);
+  return mpc_expectf(p, "one of '%s'", s);
+}
+
+mpc_parser_t *mpc_noneof(const char *s) {
+  mpc_parser_t *p = mpc_undefined();
+  p->type = MPC_TYPE_NONEOF;
+  p->data.string.x = malloc(strlen(s) + 1);
+  strcpy(p->data.string.x, s);
+  return mpc_expectf(p, "one of '%s'", s);
+
+}
+
+mpc_parser_t *mpc_satisfy(int(*f)(char)) {
+  mpc_parser_t *p = mpc_undefined();
+  p->type = MPC_TYPE_SATISFY;
+  p->data.satisfy.f = f;
+  return mpc_expectf(p, "character satisfying function %p", f);
+}
+
+mpc_parser_t *mpc_string(const char *s) {
+  mpc_parser_t *p = mpc_undefined();
+  p->type = MPC_TYPE_STRING;
+  p->data.string.x = malloc(strlen(s) + 1);
+  strcpy(p->data.string.x, s);
+  return mpc_expectf(p, "\"%s\"", s);
+}
+
+/*
+** Core Parsers
+*/
+
+mpc_parser_t *mpc_apply(mpc_parser_t *a, mpc_apply_t f) {
+  mpc_parser_t *p = mpc_undefined();
+  p->type = MPC_TYPE_APPLY;
+  p->data.apply.x = a;
+  p->data.apply.f = f;
+  return p;
+}
+
+mpc_parser_t *mpc_apply_to(mpc_parser_t *a, mpc_apply_to_t f, void *x) {
+  mpc_parser_t *p = mpc_undefined();
+  p->type = MPC_TYPE_APPLY_TO;
+  p->data.apply_to.x = a;
+  p->data.apply_to.f = f;
+  p->data.apply_to.d = x;
+  return p;
+}
+
+mpc_parser_t *mpc_predictive(mpc_parser_t *a) {
+  mpc_parser_t *p = mpc_undefined();
+  p->type = MPC_TYPE_PREDICT;
+  p->data.predict.x = a;
+  return p;
+}
+
+mpc_parser_t *mpc_not_lift(mpc_parser_t *a, mpc_dtor_t da, mpc_ctor_t lf) {
+  mpc_parser_t *p = mpc_undefined();
+  p->type = MPC_TYPE_NOT;
+  p->data.not.x = a;
+  p->data.not.dx = da;
+  p->data.not.lf = lf;
+  return p;
+}
+
+mpc_parser_t *mpc_not(mpc_parser_t *a, mpc_dtor_t da) {
+  return mpc_not_lift(a, da, mpcf_ctor_null);
+}
+
+mpc_parser_t *mpc_maybe_lift(mpc_parser_t *a, mpc_ctor_t lf) {
+  mpc_parser_t *p = mpc_undefined();
+  p->type = MPC_TYPE_MAYBE;
+  p->data.not.x = a;
+  p->data.not.lf = lf;
+  return p;
+}
+
+mpc_parser_t *mpc_maybe(mpc_parser_t *a) {
+  return mpc_maybe_lift(a, mpcf_ctor_null);
+}
+
+mpc_parser_t *mpc_many(mpc_fold_t f, mpc_parser_t *a) {
+  mpc_parser_t *p = mpc_undefined();
+  p->type = MPC_TYPE_MANY;
+  p->data.repeat.x = a;
+  p->data.repeat.f = f;
+  return p;
+}
+
+mpc_parser_t *mpc_many1(mpc_fold_t f, mpc_parser_t *a) {
+  mpc_parser_t *p = mpc_undefined();
+  p->type = MPC_TYPE_MANY1;
+  p->data.repeat.x = a;
+  p->data.repeat.f = f;
+  return p;
+}
+
+mpc_parser_t *mpc_count(int n, mpc_fold_t f, mpc_parser_t *a, mpc_dtor_t da) {
+  mpc_parser_t *p = mpc_undefined();
+  p->type = MPC_TYPE_COUNT;
+  p->data.repeat.n = n;
+  p->data.repeat.f = f;
+  p->data.repeat.x = a;
+  p->data.repeat.dx = da;
+  return p;
+}
+
+mpc_parser_t *mpc_or(int n, ...) {
+
+  int i;
+  va_list va;
+
+  mpc_parser_t *p = mpc_undefined();
+  
+  p->type = MPC_TYPE_OR;
+  p->data.or.n = n;
+  p->data.or.xs = malloc(sizeof(mpc_parser_t*) * n);
+  
+  va_start(va, n);  
+  for (i = 0; i < n; i++) {
+    p->data.or.xs[i] = va_arg(va, mpc_parser_t*);
+  }
+  va_end(va);
+  
+  return p;
+}
+
+mpc_parser_t *mpc_and(int n, mpc_fold_t f, ...) {
+
+  int i;
+  va_list va;
+
+  mpc_parser_t *p = mpc_undefined();
+  
+  p->type = MPC_TYPE_AND;
+  p->data.and.n = n;
+  p->data.and.f = f;
+  p->data.and.xs = malloc(sizeof(mpc_parser_t*) * n);
+  p->data.and.dxs = malloc(sizeof(mpc_dtor_t) * (n-1));
+
+  va_start(va, f);  
+  for (i = 0; i < n; i++) {
+    p->data.and.xs[i] = va_arg(va, mpc_parser_t*);
+  }
+  for (i = 0; i < (n-1); i++) {
+    p->data.and.dxs[i] = va_arg(va, mpc_dtor_t);
+  }  
+  va_end(va);
+  
+  return p;
+}
+
+/*
+** Common Parsers
+*/
+
+static int mpc_soi_anchor(char prev, char next) { (void) next; return (prev == '\0'); }
+static int mpc_eoi_anchor(char prev, char next) { (void) prev; return (next == '\0'); }
+
+mpc_parser_t *mpc_soi(void) { return mpc_expect(mpc_anchor(mpc_soi_anchor), "start of input"); }
+mpc_parser_t *mpc_eoi(void) { return mpc_expect(mpc_anchor(mpc_eoi_anchor), "end of input"); }
+
+static int mpc_boundary_anchor(char prev, char next) {
+  const char* word = "abcdefghijklmnopqrstuvwxyz"
+                     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                     "0123456789_";
+  if ( strchr(word, next) &&  prev == '\0') { return 1; }
+  if ( strchr(word, prev) &&  next == '\0') { return 1; }
+  if ( strchr(word, next) && !strchr(word, prev)) { return 1; }
+  if (!strchr(word, next) &&  strchr(word, prev)) { return 1; }
+  return 0;
+}
+
+mpc_parser_t *mpc_boundary(void) { return mpc_expect(mpc_anchor(mpc_boundary_anchor), "boundary"); }
+
+mpc_parser_t *mpc_whitespace(void) { return mpc_expect(mpc_oneof(" \f\n\r\t\v"), "whitespace"); }
+mpc_parser_t *mpc_whitespaces(void) { return mpc_expect(mpc_many(mpcf_strfold, mpc_whitespace()), "spaces"); }
+mpc_parser_t *mpc_blank(void) { return mpc_expect(mpc_apply(mpc_whitespaces(), mpcf_free), "whitespace"); }
+
+mpc_parser_t *mpc_newline(void) { return mpc_expect(mpc_char('\n'), "newline"); }
+mpc_parser_t *mpc_tab(void) { return mpc_expect(mpc_char('\t'), "tab"); }
+mpc_parser_t *mpc_escape(void) { return mpc_and(2, mpcf_strfold, mpc_char('\\'), mpc_any(), free); }
+
+mpc_parser_t *mpc_digit(void) { return mpc_expect(mpc_oneof("0123456789"), "digit"); }
+mpc_parser_t *mpc_hexdigit(void) { return mpc_expect(mpc_oneof("0123456789ABCDEFabcdef"), "hex digit"); }
+mpc_parser_t *mpc_octdigit(void) { return mpc_expect(mpc_oneof("01234567"), "oct digit"); }
+mpc_parser_t *mpc_digits(void) { return mpc_expect(mpc_many1(mpcf_strfold, mpc_digit()), "digits"); }
+mpc_parser_t *mpc_hexdigits(void) { return mpc_expect(mpc_many1(mpcf_strfold, mpc_hexdigit()), "hex digits"); }
+mpc_parser_t *mpc_octdigits(void) { return mpc_expect(mpc_many1(mpcf_strfold, mpc_octdigit()), "oct digits"); }
+
+mpc_parser_t *mpc_lower(void) { return mpc_expect(mpc_oneof("abcdefghijklmnopqrstuvwxyz"), "lowercase letter"); }
+mpc_parser_t *mpc_upper(void) { return mpc_expect(mpc_oneof("ABCDEFGHIJKLMNOPQRSTUVWXYZ"), "uppercase letter"); }
+mpc_parser_t *mpc_alpha(void) { return mpc_expect(mpc_oneof("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"), "letter"); }
+mpc_parser_t *mpc_underscore(void) { return mpc_expect(mpc_char('_'), "underscore"); }
+mpc_parser_t *mpc_alphanum(void) { return mpc_expect(mpc_or(3, mpc_alpha(), mpc_digit(), mpc_underscore()), "alphanumeric"); }
+
+mpc_parser_t *mpc_int(void) { return mpc_expect(mpc_apply(mpc_digits(), mpcf_int), "integer"); }
+mpc_parser_t *mpc_hex(void) { return mpc_expect(mpc_apply(mpc_hexdigits(), mpcf_hex), "hexadecimal"); }
+mpc_parser_t *mpc_oct(void) { return mpc_expect(mpc_apply(mpc_octdigits(), mpcf_oct), "octadecimal"); }
+mpc_parser_t *mpc_number(void) { return mpc_expect(mpc_or(3, mpc_int(), mpc_hex(), mpc_oct()), "number"); }
+
+mpc_parser_t *mpc_real(void) {
+
+  /* [+-]?\d+(\.\d+)?([eE][+-]?[0-9]+)? */
+  
+  mpc_parser_t *p0, *p1, *p2, *p30, *p31, *p32, *p3;
+  
+  p0 = mpc_maybe_lift(mpc_oneof("+-"), mpcf_ctor_str);
+  p1 = mpc_digits();
+  p2 = mpc_maybe_lift(mpc_and(2, mpcf_strfold, mpc_char('.'), mpc_digits(), free), mpcf_ctor_str);
+  p30 = mpc_oneof("eE");
+  p31 = mpc_maybe_lift(mpc_oneof("+-"), mpcf_ctor_str);
+  p32 = mpc_digits();
+  p3 = mpc_maybe_lift(mpc_and(3, mpcf_strfold, p30, p31, p32, free, free), mpcf_ctor_str);
+  
+  return mpc_expect(mpc_and(4, mpcf_strfold, p0, p1, p2, p3, free, free, free), "real");
+
+}
+
+mpc_parser_t *mpc_float(void) {
+  return mpc_expect(mpc_apply(mpc_real(), mpcf_float), "float");
+}
+
+mpc_parser_t *mpc_char_lit(void) {
+  return mpc_expect(mpc_between(mpc_or(2, mpc_escape(), mpc_any()), free, "'", "'"), "char");
+}
+
+mpc_parser_t *mpc_string_lit(void) {
+  mpc_parser_t *strchar = mpc_or(2, mpc_escape(), mpc_noneof("\""));
+  return mpc_expect(mpc_between(mpc_many(mpcf_strfold, strchar), free, "\"", "\""), "string");
+}
+
+mpc_parser_t *mpc_regex_lit(void) {  
+  mpc_parser_t *regexchar = mpc_or(2, mpc_escape(), mpc_noneof("/"));
+  return mpc_expect(mpc_between(mpc_many(mpcf_strfold, regexchar), free, "/", "/"), "regex");
+}
+
+mpc_parser_t *mpc_ident(void) {
+  mpc_parser_t *p0, *p1; 
+  p0 = mpc_or(2, mpc_alpha(), mpc_underscore());
+  p1 = mpc_many(mpcf_strfold, mpc_alphanum()); 
+  return mpc_and(2, mpcf_strfold, p0, p1, free);
+}
+
+/*
+** Useful Parsers
+*/
+
+mpc_parser_t *mpc_startwith(mpc_parser_t *a) { return mpc_and(2, mpcf_snd, mpc_soi(), a, mpcf_dtor_null); }
+mpc_parser_t *mpc_endwith(mpc_parser_t *a, mpc_dtor_t da) { return mpc_and(2, mpcf_fst, a, mpc_eoi(), da); }
+mpc_parser_t *mpc_whole(mpc_parser_t *a, mpc_dtor_t da) { return mpc_and(3, mpcf_snd, mpc_soi(), a, mpc_eoi(), mpcf_dtor_null, da); }
+
+mpc_parser_t *mpc_stripl(mpc_parser_t *a) { return mpc_and(2, mpcf_snd, mpc_blank(), a, mpcf_dtor_null); }
+mpc_parser_t *mpc_stripr(mpc_parser_t *a) { return mpc_and(2, mpcf_fst, a, mpc_blank(), mpcf_dtor_null); }
+mpc_parser_t *mpc_strip(mpc_parser_t *a) { return mpc_and(3, mpcf_snd, mpc_blank(), a, mpc_blank(), mpcf_dtor_null, mpcf_dtor_null); }
+mpc_parser_t *mpc_tok(mpc_parser_t *a) { return mpc_and(2, mpcf_fst, a, mpc_blank(), mpcf_dtor_null); }
+mpc_parser_t *mpc_sym(const char *s) { return mpc_tok(mpc_string(s)); }
+
+mpc_parser_t *mpc_total(mpc_parser_t *a, mpc_dtor_t da) { return mpc_whole(mpc_strip(a), da); }
+
+mpc_parser_t *mpc_between(mpc_parser_t *a, mpc_dtor_t ad, const char *o, const char *c) {
+  return mpc_and(3, mpcf_snd_free,
+    mpc_string(o), a, mpc_string(c),
+    free, ad);
+}
+
+mpc_parser_t *mpc_parens(mpc_parser_t *a, mpc_dtor_t ad)   { return mpc_between(a, ad, "(", ")"); }
+mpc_parser_t *mpc_braces(mpc_parser_t *a, mpc_dtor_t ad)   { return mpc_between(a, ad, "<", ">"); }
+mpc_parser_t *mpc_brackets(mpc_parser_t *a, mpc_dtor_t ad) { return mpc_between(a, ad, "{", "}"); }
+mpc_parser_t *mpc_squares(mpc_parser_t *a, mpc_dtor_t ad)  { return mpc_between(a, ad, "[", "]"); }
+
+mpc_parser_t *mpc_tok_between(mpc_parser_t *a, mpc_dtor_t ad, const char *o, const char *c) {
+  return mpc_and(3, mpcf_snd_free,
+    mpc_sym(o), mpc_tok(a), mpc_sym(c),
+    free, ad);
+}
+
+mpc_parser_t *mpc_tok_parens(mpc_parser_t *a, mpc_dtor_t ad)   { return mpc_tok_between(a, ad, "(", ")"); }
+mpc_parser_t *mpc_tok_braces(mpc_parser_t *a, mpc_dtor_t ad)   { return mpc_tok_between(a, ad, "<", ">"); }
+mpc_parser_t *mpc_tok_brackets(mpc_parser_t *a, mpc_dtor_t ad) { return mpc_tok_between(a, ad, "{", "}"); }
+mpc_parser_t *mpc_tok_squares(mpc_parser_t *a, mpc_dtor_t ad)  { return mpc_tok_between(a, ad, "[", "]"); }
+
+/*
+** Regular Expression Parsers
+*/
+
+/*
+** So here is a cute bootstrapping.
+**
+** I'm using the previously defined
+** mpc constructs and functions to
+** parse the user regex string and
+** construct a parser from it.
+**
+** As it turns out lots of the standard
+** mpc functions look a lot like `fold`
+** functions and so can be used indirectly
+** by many of the parsing functions to build
+** a parser directly - as we are parsing.
+**
+** This is certainly something that
+** would be less elegant/interesting 
+** in a two-phase parser which first
+** builds an AST and then traverses it
+** to generate the object.
+**
+** This whole thing acts as a great
+** case study for how trivial it can be
+** to write a great parser in a few
+** lines of code using mpc.
+*/
+
+/*
+**
+**  ### Regular Expression Grammar
+**
+**      <regex> : <term> | (<term> "|" <regex>)
+**     
+**      <term> : <factor>*
+**
+**      <factor> : <base>
+**               | <base> "*"
+**               | <base> "+"
+**               | <base> "?"
+**               | <base> "{" <digits> "}"
+**           
+**      <base> : <char>
+**             | "\" <char>
+**             | "(" <regex> ")"
+**             | "[" <range> "]"
+*/
+
+static mpc_val_t *mpcf_re_or(int n, mpc_val_t **xs) {
+  (void) n;
+  if (xs[1] == NULL) { return xs[0]; }
+  else { return mpc_or(2, xs[0], xs[1]); }
+}
+
+static mpc_val_t *mpcf_re_and(int n, mpc_val_t **xs) {
+  int i;
+  mpc_parser_t *p = mpc_lift(mpcf_ctor_str);
+  for (i = 0; i < n; i++) {
+    p = mpc_and(2, mpcf_strfold, p, xs[i], free);
+  }
+  return p;
+}
+
+static mpc_val_t *mpcf_re_repeat(int n, mpc_val_t **xs) {
+  int num;
+  (void) n;
+  if (xs[1] == NULL) { return xs[0]; }
+  if (strcmp(xs[1], "*") == 0) { free(xs[1]); return mpc_many(mpcf_strfold, xs[0]); }
+  if (strcmp(xs[1], "+") == 0) { free(xs[1]); return mpc_many1(mpcf_strfold, xs[0]); }
+  if (strcmp(xs[1], "?") == 0) { free(xs[1]); return mpc_maybe_lift(xs[0], mpcf_ctor_str); }
+  num = *(int*)xs[1];
+  free(xs[1]);
+  
+  return mpc_count(num, mpcf_strfold, xs[0], free);
+}
+
+static mpc_parser_t *mpc_re_escape_char(char c) {
+  switch (c) {
+    case 'a': return mpc_char('\a');
+    case 'f': return mpc_char('\f');
+    case 'n': return mpc_char('\n');
+    case 'r': return mpc_char('\r');
+    case 't': return mpc_char('\t');
+    case 'v': return mpc_char('\v');
+    case 'b': return mpc_and(2, mpcf_snd, mpc_boundary(), mpc_lift(mpcf_ctor_str), free);
+    case 'B': return mpc_not_lift(mpc_boundary(), free, mpcf_ctor_str);
+    case 'A': return mpc_and(2, mpcf_snd, mpc_soi(), mpc_lift(mpcf_ctor_str), free);
+    case 'Z': return mpc_and(2, mpcf_snd, mpc_eoi(), mpc_lift(mpcf_ctor_str), free);
+    case 'd': return mpc_digit();
+    case 'D': return mpc_not_lift(mpc_digit(), free, mpcf_ctor_str);
+    case 's': return mpc_whitespace();
+    case 'S': return mpc_not_lift(mpc_whitespace(), free, mpcf_ctor_str);
+    case 'w': return mpc_alphanum();
+    case 'W': return mpc_not_lift(mpc_alphanum(), free, mpcf_ctor_str);
+    default: return NULL;
+  }
+}
+
+static mpc_val_t *mpcf_re_escape(mpc_val_t *x) {
+  
+  char *s = x;
+  mpc_parser_t *p;
+  
+  /* Regex Special Characters */
+  if (s[0] == '.') { free(s); return mpc_any(); }
+  if (s[0] == '^') { free(s); return mpc_and(2, mpcf_snd, mpc_soi(), mpc_lift(mpcf_ctor_str), free); }
+  if (s[0] == '$') { free(s); return mpc_and(2, mpcf_snd, mpc_eoi(), mpc_lift(mpcf_ctor_str), free); }
+  
+  /* Regex Escape */
+  if (s[0] == '\\') {
+    p = mpc_re_escape_char(s[1]);
+    p = (p == NULL) ? mpc_char(s[1]) : p;
+    free(s);
+    return p;
+  }
+  
+  /* Regex Standard */
+  p = mpc_char(s[0]);
+  free(s);
+  return p;
+}
+
+static const char *mpc_re_range_escape_char(char c) {
+  switch (c) {
+    case '-': return "-";
+    case 'a': return "\a";
+    case 'f': return "\f";
+    case 'n': return "\n";
+    case 'r': return "\r";
+    case 't': return "\t";
+    case 'v': return "\v";
+    case 'b': return "\b";
+    case 'd': return "0123456789";
+    case 's': return " \f\n\r\t\v";
+    case 'w': return "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_";
+    default: return NULL;
+  }
+}
+
+static mpc_val_t *mpcf_re_range(mpc_val_t *x) {
+  
+  mpc_parser_t *out;
+  char *range = calloc(1,1);
+  const char *tmp = NULL;
+  const char *s = x;
+  int comp = s[0] == '^' ? 1 : 0;
+  size_t start, end;
+  size_t i, j;
+  
+  if (s[0] == '\0') { free(x); return mpc_fail("Invalid Regex Range Expression"); } 
+  if (s[0] == '^' && 
+      s[1] == '\0') { free(x); return mpc_fail("Invalid Regex Range Expression"); }
+  
+  for (i = comp; i < strlen(s); i++){
+    
+    /* Regex Range Escape */
+    if (s[i] == '\\') {
+      tmp = mpc_re_range_escape_char(s[i+1]);
+      if (tmp != NULL) {
+        range = realloc(range, strlen(range) + strlen(tmp) + 1);
+        strcat(range, tmp);
+      } else {
+        range = realloc(range, strlen(range) + 1 + 1);
+        range[strlen(range) + 1] = '\0';
+        range[strlen(range) + 0] = s[i+1];      
+      }
+      i++;
+    }
+    
+    /* Regex Range...Range */
+    else if (s[i] == '-') {
+      if (s[i+1] == '\0' || i == 0) {
+          range = realloc(range, strlen(range) + strlen("-") + 1);
+          strcat(range, "-");
+      } else {
+        start = s[i-1]+1;
+        end = s[i+1]-1;
+        for (j = start; j <= end; j++) {
+          range = realloc(range, strlen(range) + 1 + 1);
+          range[strlen(range) + 1] = '\0';
+          range[strlen(range) + 0] = j;
+        }        
+      }
+    }
+    
+    /* Regex Range Normal */
+    else {
+      range = realloc(range, strlen(range) + 1 + 1);
+      range[strlen(range) + 1] = '\0';
+      range[strlen(range) + 0] = s[i];
+    }
+  
+  }
+  
+  out = comp == 1 ? mpc_noneof(range) : mpc_oneof(range);
+  
+  free(x);
+  free(range);
+  
+  return out;
+}
+
+mpc_parser_t *mpc_re(const char *re) {
+  
+  char *err_msg;
+  mpc_parser_t *err_out;
+  mpc_result_t r;
+  mpc_parser_t *Regex, *Term, *Factor, *Base, *Range, *RegexEnclose; 
+  
+  Regex  = mpc_new("regex");
+  Term   = mpc_new("term");
+  Factor = mpc_new("factor");
+  Base   = mpc_new("base");
+  Range  = mpc_new("range");
+  
+  mpc_define(Regex, mpc_and(2, mpcf_re_or,
+    Term, 
+    mpc_maybe(mpc_and(2, mpcf_snd_free, mpc_char('|'), Regex, free)),
+    (mpc_dtor_t)mpc_delete
+  ));
+  
+  mpc_define(Term, mpc_many(mpcf_re_and, Factor));
+  
+  mpc_define(Factor, mpc_and(2, mpcf_re_repeat,
+    Base,
+    mpc_or(5,
+      mpc_char('*'), mpc_char('+'), mpc_char('?'),
+      mpc_brackets(mpc_int(), free),
+      mpc_pass()),
+    (mpc_dtor_t)mpc_delete
+  ));
+  
+  mpc_define(Base, mpc_or(4,
+    mpc_parens(Regex, (mpc_dtor_t)mpc_delete),
+    mpc_squares(Range, (mpc_dtor_t)mpc_delete),
+    mpc_apply(mpc_escape(), mpcf_re_escape),
+    mpc_apply(mpc_noneof(")|"), mpcf_re_escape)
+  ));
+  
+  mpc_define(Range, mpc_apply(
+    mpc_many(mpcf_strfold, mpc_or(2, mpc_escape(), mpc_noneof("]"))),
+    mpcf_re_range
+  ));
+  
+  RegexEnclose = mpc_whole(mpc_predictive(Regex), (mpc_dtor_t)mpc_delete);
+  
+  if(!mpc_parse("<mpc_re_compiler>", re, RegexEnclose, &r)) {
+    err_msg = mpc_err_string(r.error);
+    err_out = mpc_failf("Invalid Regex: %s", err_msg);
+    mpc_err_delete(r.error);  
+    free(err_msg);
+    r.output = err_out;
+  }
+  
+  mpc_delete(RegexEnclose);
+  mpc_cleanup(5, Regex, Term, Factor, Base, Range);
+  
+  return r.output;
+  
+}
+
+/*
+** Common Fold Functions
+*/
+
+void mpcf_dtor_null(mpc_val_t *x) { (void) x; return; }
+
+mpc_val_t *mpcf_ctor_null(void) { return NULL; }
+mpc_val_t *mpcf_ctor_str(void) { return calloc(1, 1); }
+mpc_val_t *mpcf_free(mpc_val_t *x) { free(x); return NULL; }
+
+mpc_val_t *mpcf_int(mpc_val_t *x) {
+  int *y = malloc(sizeof(int));
+  *y = strtol(x, NULL, 10);
+  free(x);
+  return y;
+}
+
+mpc_val_t *mpcf_hex(mpc_val_t *x) {
+  int *y = malloc(sizeof(int));
+  *y = strtol(x, NULL, 16);
+  free(x);
+  return y;
+}
+
+mpc_val_t *mpcf_oct(mpc_val_t *x) {
+  int *y = malloc(sizeof(int));
+  *y = strtol(x, NULL, 8);
+  free(x);
+  return y;
+}
+
+mpc_val_t *mpcf_float(mpc_val_t *x) {
+  float* y = malloc(sizeof(float));
+  *y = strtod(x, NULL);
+  free(x);
+  return y;
+}
+
+static const char mpc_escape_input_c[]  = {
+  '\a', '\b', '\f', '\n', '\r',
+  '\t', '\v', '\\', '\'', '\"', '\0'};
+    
+static const char *mpc_escape_output_c[] = {
+  "\\a", "\\b", "\\f", "\\n", "\\r", "\\t", 
+  "\\v", "\\\\", "\\'", "\\\"", "\\0", NULL};
+
+static const char mpc_escape_input_raw_re[] = { '/' };
+static const char *mpc_escape_output_raw_re[] = { "\\/", NULL };
+
+static const char mpc_escape_input_raw_cstr[] = { '"' };
+static const char *mpc_escape_output_raw_cstr[] = { "\\\"", NULL };
+
+static const char mpc_escape_input_raw_cchar[] = { '\'' };
+static const char *mpc_escape_output_raw_cchar[] = { "\\'", NULL };
+
+static mpc_val_t *mpcf_escape_new(mpc_val_t *x, const char *input, const char **output) {
+  
+  int i;
+  int found;
+  char *s = x;
+  char *y = calloc(1, 1);
+  char buff[2];
+  
+  while (*s) {
+    
+    i = 0;
+    found = 0;
+
+    while (output[i]) {
+      if (*s == input[i]) {
+        y = realloc(y, strlen(y) + strlen(output[i]) + 1);
+        strcat(y, output[i]);
+        found = 1;
+        break;
+      }
+      i++;
+    }
+    
+    if (!found) {
+      y = realloc(y, strlen(y) + 2);
+      buff[0] = *s; buff[1] = '\0';
+      strcat(y, buff);
+    }
+    
+    s++;
+  }
+  
+  
+  return y;
+}
+
+static mpc_val_t *mpcf_unescape_new(mpc_val_t *x, const char *input, const char **output) {
+  
+  int i;
+  int found = 0;
+  char *s = x;
+  char *y = calloc(1, 1);
+  char buff[2];
+
+  while (*s) {
+    
+    i = 0;
+    found = 0;
+    
+    while (output[i]) {
+      if ((*(s+0)) == output[i][0] &&
+          (*(s+1)) == output[i][1]) {
+        y = realloc(y, strlen(y) + 2);
+        buff[0] = input[i]; buff[1] = '\0';
+        strcat(y, buff);
+        found = 1;
+        s++;
+        break;
+      }
+      i++;
+    }
+      
+    if (!found) {
+      y = realloc(y, strlen(y) + 2);
+      buff[0] = *s; buff[1] = '\0';
+      strcat(y, buff);
+    }
+    
+    if (*s == '\0') { break; }
+    else { s++; }
+  }
+  
+  return y;
+  
+}
+
+mpc_val_t *mpcf_escape(mpc_val_t *x) {
+  mpc_val_t *y = mpcf_escape_new(x, mpc_escape_input_c, mpc_escape_output_c);
+  free(x);
+  return y;
+}
+
+mpc_val_t *mpcf_unescape(mpc_val_t *x) {
+  mpc_val_t *y = mpcf_unescape_new(x, mpc_escape_input_c, mpc_escape_output_c);
+  free(x);
+  return y;
+}
+
+mpc_val_t *mpcf_unescape_regex(mpc_val_t *x) {
+  mpc_val_t *y = mpcf_unescape_new(x, mpc_escape_input_raw_re, mpc_escape_output_raw_re);
+  free(x);
+  return y;  
+}
+
+mpc_val_t *mpcf_escape_string_raw(mpc_val_t *x) {
+  mpc_val_t *y = mpcf_escape_new(x, mpc_escape_input_raw_cstr, mpc_escape_output_raw_cstr);
+  free(x);
+  return y;
+}
+
+mpc_val_t *mpcf_unescape_string_raw(mpc_val_t *x) {
+  mpc_val_t *y = mpcf_unescape_new(x, mpc_escape_input_raw_cstr, mpc_escape_output_raw_cstr);
+  free(x);
+  return y;
+}
+
+mpc_val_t *mpcf_escape_char_raw(mpc_val_t *x) {
+  mpc_val_t *y = mpcf_escape_new(x, mpc_escape_input_raw_cchar, mpc_escape_output_raw_cchar);
+  free(x);
+  return y;
+}
+
+mpc_val_t *mpcf_unescape_char_raw(mpc_val_t *x) {
+  mpc_val_t *y = mpcf_unescape_new(x, mpc_escape_input_raw_cchar, mpc_escape_output_raw_cchar);
+  free(x);
+  return y;
+}
+
+mpc_val_t *mpcf_null(int n, mpc_val_t** xs) { (void) n; (void) xs; return NULL; }
+mpc_val_t *mpcf_fst(int n, mpc_val_t **xs) { (void) n; return xs[0]; }
+mpc_val_t *mpcf_snd(int n, mpc_val_t **xs) { (void) n; return xs[1]; }
+mpc_val_t *mpcf_trd(int n, mpc_val_t **xs) { (void) n; return xs[2]; }
+
+static mpc_val_t *mpcf_nth_free(int n, mpc_val_t **xs, int x) {
+  int i;
+  for (i = 0; i < n; i++) {
+    if (i != x) { free(xs[i]); }
+  }
+  return xs[x];
+}
+ 
+mpc_val_t *mpcf_fst_free(int n, mpc_val_t **xs) { return mpcf_nth_free(n, xs, 0); }
+mpc_val_t *mpcf_snd_free(int n, mpc_val_t **xs) { return mpcf_nth_free(n, xs, 1); }
+mpc_val_t *mpcf_trd_free(int n, mpc_val_t **xs) { return mpcf_nth_free(n, xs, 2); }
+
+mpc_val_t *mpcf_strfold(int n, mpc_val_t **xs) {
+  char *x = calloc(1, 1);
+  int i;
+  for (i = 0; i < n; i++) {
+    x = realloc(x, strlen(x) + strlen(xs[i]) + 1);
+    strcat(x, xs[i]);
+    free(xs[i]);
+  }
+  return x;
+}
+
+mpc_val_t *mpcf_maths(int n, mpc_val_t **xs) {
+  int **vs = (int**)xs;
+  (void) n;
+  
+  if (strcmp(xs[1], "*") == 0) { *vs[0] *= *vs[2]; }
+  if (strcmp(xs[1], "/") == 0) { *vs[0] /= *vs[2]; }
+  if (strcmp(xs[1], "%") == 0) { *vs[0] %= *vs[2]; }
+  if (strcmp(xs[1], "+") == 0) { *vs[0] += *vs[2]; }
+  if (strcmp(xs[1], "-") == 0) { *vs[0] -= *vs[2]; }
+  
+  free(xs[1]); free(xs[2]);
+  
+  return xs[0];
+}
+
+/*
+** Printing
+*/
+
+static void mpc_print_unretained(mpc_parser_t *p, int force) {
+  
+  /* TODO: Print Everything Escaped */
+  
+  int i;
+  char *s, *e;
+  char buff[2];
+  
+  if (p->retained && !force) {;
+    if (p->name) { printf("<%s>", p->name); }
+    else { printf("<anon>"); }
+    return;
+  }
+  
+  if (p->type == MPC_TYPE_UNDEFINED) { printf("<?>"); }
+  if (p->type == MPC_TYPE_PASS)   { printf("<:>"); }
+  if (p->type == MPC_TYPE_FAIL)   { printf("<!>"); }
+  if (p->type == MPC_TYPE_LIFT)   { printf("<#>"); }
+  if (p->type == MPC_TYPE_STATE)  { printf("<S>"); }
+  if (p->type == MPC_TYPE_ANCHOR) { printf("<@>"); }
+  if (p->type == MPC_TYPE_EXPECT) {
+    printf("%s", p->data.expect.m);
+    /*mpc_print_unretained(p->data.expect.x, 0);*/
+  }
+  
+  if (p->type == MPC_TYPE_ANY) { printf("<.>"); }
+  if (p->type == MPC_TYPE_SATISFY) { printf("<f>"); }
+
+  if (p->type == MPC_TYPE_SINGLE) {
+    buff[0] = p->data.single.x; buff[1] = '\0';
+    s = mpcf_escape_new(
+      buff,
+      mpc_escape_input_c,
+      mpc_escape_output_c);
+    printf("'%s'", s);
+    free(s);
+  }
+  
+  if (p->type == MPC_TYPE_RANGE) {
+    buff[0] = p->data.range.x; buff[1] = '\0';
+    s = mpcf_escape_new(
+      buff,
+      mpc_escape_input_c,
+      mpc_escape_output_c);
+    buff[0] = p->data.range.y; buff[1] = '\0';
+    e = mpcf_escape_new(
+      buff,
+      mpc_escape_input_c,
+      mpc_escape_output_c);
+    printf("[%s-%s]", s, e);
+    free(s);
+    free(e);
+  }
+  
+  if (p->type == MPC_TYPE_ONEOF) {
+    s = mpcf_escape_new(
+      p->data.string.x,
+      mpc_escape_input_c,
+      mpc_escape_output_c);
+    printf("[%s]", s);
+    free(s);
+  }
+  
+  if (p->type == MPC_TYPE_NONEOF) {
+    s = mpcf_escape_new(
+      p->data.string.x,
+      mpc_escape_input_c,
+      mpc_escape_output_c);
+    printf("[^%s]", s);
+    free(s);
+  }
+  
+  if (p->type == MPC_TYPE_STRING) {
+    s = mpcf_escape_new(
+      p->data.string.x,
+      mpc_escape_input_c,
+      mpc_escape_output_c);
+    printf("\"%s\"", s);
+    free(s);
+  }
+  
+  if (p->type == MPC_TYPE_APPLY)    { mpc_print_unretained(p->data.apply.x, 0); }
+  if (p->type == MPC_TYPE_APPLY_TO) { mpc_print_unretained(p->data.apply_to.x, 0); }
+  if (p->type == MPC_TYPE_PREDICT)  { mpc_print_unretained(p->data.predict.x, 0); }
+
+  if (p->type == MPC_TYPE_NOT)   { mpc_print_unretained(p->data.not.x, 0); printf("!"); }
+  if (p->type == MPC_TYPE_MAYBE) { mpc_print_unretained(p->data.not.x, 0); printf("?"); }
+
+  if (p->type == MPC_TYPE_MANY)  { mpc_print_unretained(p->data.repeat.x, 0); printf("*"); }
+  if (p->type == MPC_TYPE_MANY1) { mpc_print_unretained(p->data.repeat.x, 0); printf("+"); }
+  if (p->type == MPC_TYPE_COUNT) { mpc_print_unretained(p->data.repeat.x, 0); printf("{%i}", p->data.repeat.n); }
+  
+  if (p->type == MPC_TYPE_OR) {
+    printf("(");
+    for(i = 0; i < p->data.or.n-1; i++) {
+      mpc_print_unretained(p->data.or.xs[i], 0);
+      printf(" | ");
+    }
+    mpc_print_unretained(p->data.or.xs[p->data.or.n-1], 0);
+    printf(")");
+  }
+  
+  if (p->type == MPC_TYPE_AND) {
+    printf("(");
+    for(i = 0; i < p->data.and.n-1; i++) {
+      mpc_print_unretained(p->data.and.xs[i], 0);
+      printf(" ");
+    }
+    mpc_print_unretained(p->data.and.xs[p->data.and.n-1], 0);
+    printf(")");
+  }
+  
+}
+
+void mpc_print(mpc_parser_t *p) {
+  mpc_print_unretained(p, 1);
+  printf("\n");
+}
+
+/*
+** Testing
+*/
+
+/*
+** These functions are slightly unwieldy and
+** also the whole of the testing suite for mpc
+** mpc is pretty shaky.
+**
+** It could do with a lot more tests and more
+** precision. Currently I am only really testing
+** changes off of the examples.
+**
+*/
+
+int mpc_test_fail(mpc_parser_t *p, const char *s, const void *d,
+  int(*tester)(const void*, const void*),
+  mpc_dtor_t destructor,
+  void(*printer)(const void*)) {
+  mpc_result_t r;
+  (void) printer;
+  if (mpc_parse("<test>", s, p, &r)) {
+
+    if (tester(r.output, d)) {
+      destructor(r.output);
+      return 0;
+    } else {
+      destructor(r.output);
+      return 1;
+    }
+  
+  } else {
+    mpc_err_delete(r.error);
+    return 1;
+  }
+  
+}
+
+int mpc_test_pass(mpc_parser_t *p, const char *s, const void *d,
+  int(*tester)(const void*, const void*), 
+  mpc_dtor_t destructor, 
+  void(*printer)(const void*)) {
+
+  mpc_result_t r;  
+  if (mpc_parse("<test>", s, p, &r)) {
+    
+    if (tester(r.output, d)) {
+      destructor(r.output);
+      return 1;
+    } else {
+      printf("Got "); printer(r.output); printf("\n");
+      printf("Expected "); printer(d); printf("\n");
+      destructor(r.output);
+      return 0;
+    }
+    
+  } else {    
+    mpc_err_print(r.error);
+    mpc_err_delete(r.error);
+    return 0;
+    
+  }
+  
+}
+
+
+/*
+** AST
+*/
+
+void mpc_ast_delete(mpc_ast_t *a) {
+  
+  int i;
+  
+  if (a == NULL) { return; }
+  for (i = 0; i < a->children_num; i++) {
+    mpc_ast_delete(a->children[i]);
+  }
+  
+  free(a->children);
+  free(a->tag);
+  free(a->contents);
+  free(a);
+  
+}
+
+static void mpc_ast_delete_no_children(mpc_ast_t *a) {
+  free(a->children);
+  free(a->tag);
+  free(a->contents);
+  free(a);
+}
+
+mpc_ast_t *mpc_ast_new(const char *tag, const char *contents) {
+  
+  mpc_ast_t *a = malloc(sizeof(mpc_ast_t));
+  
+  a->tag = malloc(strlen(tag) + 1);
+  strcpy(a->tag, tag);
+  
+  a->contents = malloc(strlen(contents) + 1);
+  strcpy(a->contents, contents);
+  
+  a->state = mpc_state_new();
+  
+  a->children_num = 0;
+  a->children = NULL;
+  return a;
+  
+}
+
+mpc_ast_t *mpc_ast_build(int n, const char *tag, ...) {
+  
+  mpc_ast_t *a = mpc_ast_new(tag, "");
+  
+  int i;
+  va_list va;
+  va_start(va, tag);
+  
+  for (i = 0; i < n; i++) {
+    mpc_ast_add_child(a, va_arg(va, mpc_ast_t*));
+  }
+  
+  va_end(va);
+  
+  return a;
+  
+}
+
+mpc_ast_t *mpc_ast_add_root(mpc_ast_t *a) {
+
+  mpc_ast_t *r;
+
+  if (a == NULL) { return a; }
+  if (a->children_num == 0) { return a; }
+  if (a->children_num == 1) { return a; }
+
+  r = mpc_ast_new(">", "");
+  mpc_ast_add_child(r, a);
+  return r;
+}
+
+int mpc_ast_eq(mpc_ast_t *a, mpc_ast_t *b) {
+  
+  int i;
+
+  if (strcmp(a->tag, b->tag) != 0) { return 0; }
+  if (strcmp(a->contents, b->contents) != 0) { return 0; }
+  if (a->children_num != b->children_num) { return 0; }
+  
+  for (i = 0; i < a->children_num; i++) {
+    if (!mpc_ast_eq(a->children[i], b->children[i])) { return 0; }
+  }
+  
+  return 1;
+}
+
+mpc_ast_t *mpc_ast_add_child(mpc_ast_t *r, mpc_ast_t *a) {
+  r->children_num++;
+  r->children = realloc(r->children, sizeof(mpc_ast_t*) * r->children_num);
+  r->children[r->children_num-1] = a;
+  return r;
+}
+
+mpc_ast_t *mpc_ast_add_tag(mpc_ast_t *a, const char *t) {
+  if (a == NULL) { return a; }
+  a->tag = realloc(a->tag, strlen(t) + 1 + strlen(a->tag) + 1);
+  memmove(a->tag + strlen(t) + 1, a->tag, strlen(a->tag)+1);
+  memmove(a->tag, t, strlen(t));
+  memmove(a->tag + strlen(t), "|", 1);
+  return a;
+}
+
+mpc_ast_t *mpc_ast_tag(mpc_ast_t *a, const char *t) {
+  a->tag = realloc(a->tag, strlen(t) + 1);
+  strcpy(a->tag, t);
+  return a;
+}
+
+mpc_ast_t *mpc_ast_state(mpc_ast_t *a, mpc_state_t s) {
+  if (a == NULL) { return a; }
+  a->state = s;
+  return a;
+}
+
+static void mpc_ast_print_depth(mpc_ast_t *a, int d, FILE *fp) {
+  
+  int i;
+  for (i = 0; i < d; i++) { fprintf(fp, "  "); }
+  
+  if (strlen(a->contents)) {
+    fprintf(fp, "%s:%lu:%lu '%s'\n", a->tag, 
+      (long unsigned int)(a->state.row+1),
+      (long unsigned int)(a->state.col+1),
+      a->contents);
+  } else {
+    fprintf(fp, "%s \n", a->tag);
+  }
+  
+  for (i = 0; i < a->children_num; i++) {
+    mpc_ast_print_depth(a->children[i], d+1, fp);
+  }
+  
+}
+
+void mpc_ast_print(mpc_ast_t *a) {
+  mpc_ast_print_depth(a, 0, stdout);
+}
+
+void mpc_ast_print_to(mpc_ast_t *a, FILE *fp) {
+  mpc_ast_print_depth(a, 0, fp);
+}
+
+mpc_val_t *mpcf_fold_ast(int n, mpc_val_t **xs) {
+  
+  int i, j;
+  mpc_ast_t** as = (mpc_ast_t**)xs;
+  mpc_ast_t *r;
+  
+  if (n == 0) { return NULL; }
+  if (n == 1) { return xs[0]; }
+  if (n == 2 && xs[1] == NULL) { return xs[0]; }
+  if (n == 2 && xs[0] == NULL) { return xs[1]; }
+  
+  r = mpc_ast_new(">", "");
+  
+  for (i = 0; i < n; i++) {
+    
+    if (as[i] == NULL) { continue; }
+    
+    if (as[i] && as[i]->children_num > 0) {
+      
+      for (j = 0; j < as[i]->children_num; j++) {
+        mpc_ast_add_child(r, as[i]->children[j]);
+      }
+      
+      mpc_ast_delete_no_children(as[i]);
+      
+    } else if (as[i] && as[i]->children_num == 0) {
+      mpc_ast_add_child(r, as[i]);
+    }
+  
+  }
+  
+  if (r->children_num) {
+    r->state = r->children[0]->state;
+  }
+  
+  return r;
+}
+
+mpc_val_t *mpcf_str_ast(mpc_val_t *c) {
+  mpc_ast_t *a = mpc_ast_new("", c);
+  free(c);
+  return a;
+}
+
+mpc_val_t *mpcf_state_ast(int n, mpc_val_t **xs) {
+  mpc_state_t *s = ((mpc_state_t**)xs)[0];
+  mpc_ast_t *a = ((mpc_ast_t**)xs)[1];
+  a = mpc_ast_state(a, *s);
+  free(s);
+  (void) n;
+  return a;
+}
+
+mpc_parser_t *mpca_state(mpc_parser_t *a) {
+  return mpc_and(2, mpcf_state_ast, mpc_state(), a, free);
+}
+
+mpc_parser_t *mpca_tag(mpc_parser_t *a, const char *t) {
+  return mpc_apply_to(a, (mpc_apply_to_t)mpc_ast_tag, (void*)t);
+}
+
+mpc_parser_t *mpca_add_tag(mpc_parser_t *a, const char *t) {
+  return mpc_apply_to(a, (mpc_apply_to_t)mpc_ast_add_tag, (void*)t);
+}
+
+mpc_parser_t *mpca_root(mpc_parser_t *a) {
+  return mpc_apply(a, (mpc_apply_t)mpc_ast_add_root);
+}
+
+mpc_parser_t *mpca_not(mpc_parser_t *a) { return mpc_not(a, (mpc_dtor_t)mpc_ast_delete); }
+mpc_parser_t *mpca_maybe(mpc_parser_t *a) { return mpc_maybe(a); }
+mpc_parser_t *mpca_many(mpc_parser_t *a) { return mpc_many(mpcf_fold_ast, a); }
+mpc_parser_t *mpca_many1(mpc_parser_t *a) { return mpc_many1(mpcf_fold_ast, a); }
+mpc_parser_t *mpca_count(int n, mpc_parser_t *a) { return mpc_count(n, mpcf_fold_ast, a, (mpc_dtor_t)mpc_ast_delete); }
+
+mpc_parser_t *mpca_or(int n, ...) {
+
+  int i;
+  va_list va;
+
+  mpc_parser_t *p = mpc_undefined();
+  
+  p->type = MPC_TYPE_OR;
+  p->data.or.n = n;
+  p->data.or.xs = malloc(sizeof(mpc_parser_t*) * n);
+  
+  va_start(va, n);  
+  for (i = 0; i < n; i++) {
+    p->data.or.xs[i] = va_arg(va, mpc_parser_t*);
+  }
+  va_end(va);
+  
+  return p;
+  
+}
+
+mpc_parser_t *mpca_and(int n, ...) {
+  
+  int i;
+  va_list va;
+  
+  mpc_parser_t *p = mpc_undefined();
+  
+  p->type = MPC_TYPE_AND;
+  p->data.and.n = n;
+  p->data.and.f = mpcf_fold_ast;
+  p->data.and.xs = malloc(sizeof(mpc_parser_t*) * n);
+  p->data.and.dxs = malloc(sizeof(mpc_dtor_t) * (n-1));
+  
+  va_start(va, n);
+  for (i = 0; i < n; i++) {
+    p->data.and.xs[i] = va_arg(va, mpc_parser_t*);
+  }
+  for (i = 0; i < (n-1); i++) {
+    p->data.and.dxs[i] = (mpc_dtor_t)mpc_ast_delete;
+  }    
+  va_end(va);
+  
+  return p;  
+}
+
+mpc_parser_t *mpca_total(mpc_parser_t *a) { return mpc_total(a, (mpc_dtor_t)mpc_ast_delete); }
+
+/*
+** Grammar Parser
+*/
+
+/*
+** This is another interesting bootstrapping.
+**
+** Having a general purpose AST type allows
+** users to specify the grammar alone and
+** let all fold rules be automatically taken
+** care of by existing functions.
+**
+** You don't get to control the type spat
+** out but this means you can make a nice
+** parser to take in some grammar in nice
+** syntax and spit out a parser that works.
+**
+** The grammar for this looks surprisingly
+** like regex but the main difference is that
+** it is now whitespace insensitive and the
+** base type takes literals of some form.
+*/
+
+/*
+**
+**  ### Grammar Grammar
+**
+**      <grammar> : (<term> "|" <grammar>) | <term>
+**     
+**      <term> : <factor>*
+**
+**      <factor> : <base>
+**               | <base> "*"
+**               | <base> "+"
+**               | <base> "?"
+**               | <base> "{" <digits> "}"
+**           
+**      <base> : "<" (<digits> | <ident>) ">"
+**             | <string_lit>
+**             | <char_lit>
+**             | <regex_lit>
+**             | "(" <grammar> ")"
+*/
+
+typedef struct {
+  va_list *va;
+  int parsers_num;
+  mpc_parser_t **parsers;
+  int flags;
+} mpca_grammar_st_t;
+
+static mpc_val_t *mpcaf_grammar_or(int n, mpc_val_t **xs) {
+  (void) n;
+  if (xs[1] == NULL) { return xs[0]; }
+  else { return mpca_or(2, xs[0], xs[1]); }
+}
+
+static mpc_val_t *mpcaf_grammar_and(int n, mpc_val_t **xs) {
+  int i;
+  mpc_parser_t *p = mpc_pass();  
+  for (i = 0; i < n; i++) {
+    if (xs[i] != NULL) { p = mpca_and(2, p, xs[i]); }
+  }
+  return p;
+}
+
+static mpc_val_t *mpcaf_grammar_repeat(int n, mpc_val_t **xs) { 
+  int num;
+  (void) n;
+  if (xs[1] == NULL) { return xs[0]; }  
+  if (strcmp(xs[1], "*") == 0) { free(xs[1]); return mpca_many(xs[0]); }
+  if (strcmp(xs[1], "+") == 0) { free(xs[1]); return mpca_many1(xs[0]); }
+  if (strcmp(xs[1], "?") == 0) { free(xs[1]); return mpca_maybe(xs[0]); }
+  if (strcmp(xs[1], "!") == 0) { free(xs[1]); return mpca_not(xs[0]); }
+  num = *((int*)xs[1]);
+  free(xs[1]);
+  return mpca_count(num, xs[0]);
+}
+
+static mpc_val_t *mpcaf_grammar_string(mpc_val_t *x, void *s) {
+  mpca_grammar_st_t *st = s;
+  char *y = mpcf_unescape(x);
+  mpc_parser_t *p = (st->flags & MPCA_LANG_WHITESPACE_SENSITIVE) ? mpc_string(y) : mpc_tok(mpc_string(y));
+  free(y);
+  return mpca_state(mpca_tag(mpc_apply(p, mpcf_str_ast), "string"));
+}
+
+static mpc_val_t *mpcaf_grammar_char(mpc_val_t *x, void *s) {
+  mpca_grammar_st_t *st = s;
+  char *y = mpcf_unescape(x);
+  mpc_parser_t *p = (st->flags & MPCA_LANG_WHITESPACE_SENSITIVE) ? mpc_char(y[0]) : mpc_tok(mpc_char(y[0]));
+  free(y);
+  return mpca_state(mpca_tag(mpc_apply(p, mpcf_str_ast), "char"));
+}
+
+static mpc_val_t *mpcaf_grammar_regex(mpc_val_t *x, void *s) {
+  mpca_grammar_st_t *st = s;
+  char *y = mpcf_unescape_regex(x);
+  mpc_parser_t *p = (st->flags & MPCA_LANG_WHITESPACE_SENSITIVE) ? mpc_re(y) : mpc_tok(mpc_re(y));
+  free(y);
+  return mpca_state(mpca_tag(mpc_apply(p, mpcf_str_ast), "regex"));
+}
+
+/* Should this just use `isdigit` instead? */
+static int is_number(const char* s) {
+  size_t i;
+  for (i = 0; i < strlen(s); i++) { if (!strchr("0123456789", s[i])) { return 0; } }
+  return 1;
+}
+
+static mpc_parser_t *mpca_grammar_find_parser(char *x, mpca_grammar_st_t *st) {
+  
+  int i;
+  mpc_parser_t *p;
+  
+  /* Case of Number */
+  if (is_number(x)) {
+
+    i = strtol(x, NULL, 10);
+    
+    while (st->parsers_num <= i) {
+      st->parsers_num++;
+      st->parsers = realloc(st->parsers, sizeof(mpc_parser_t*) * st->parsers_num);
+      st->parsers[st->parsers_num-1] = va_arg(*st->va, mpc_parser_t*);
+      if (st->parsers[st->parsers_num-1] == NULL) {
+        return mpc_failf("No Parser in position %i! Only supplied %i Parsers!", i, st->parsers_num);
+      }
+    }
+    
+    return st->parsers[st->parsers_num-1];
+  
+  /* Case of Identifier */
+  } else {
+    
+    /* Search Existing Parsers */
+    for (i = 0; i < st->parsers_num; i++) {
+      mpc_parser_t *q = st->parsers[i];
+      if (q == NULL) { return mpc_failf("Unknown Parser '%s'!", x); }
+      if (q->name && strcmp(q->name, x) == 0) { return q; }
+    }
+    
+    /* Search New Parsers */
+    while (1) {
+    
+      p = va_arg(*st->va, mpc_parser_t*);
+      
+      st->parsers_num++;
+      st->parsers = realloc(st->parsers, sizeof(mpc_parser_t*) * st->parsers_num);
+      st->parsers[st->parsers_num-1] = p;
+      
+      if (p == NULL) { return mpc_failf("Unknown Parser '%s'!", x); }
+      if (p->name && strcmp(p->name, x) == 0) { return p; }
+      
+    }
+  
+  }  
+  
+}
+
+static mpc_val_t *mpcaf_grammar_id(mpc_val_t *x, void *s) {
+  
+  mpca_grammar_st_t *st = s;
+  mpc_parser_t *p = mpca_grammar_find_parser(x, st);
+  free(x);
+
+  if (p->name) {
+    return mpca_state(mpca_root(mpca_add_tag(p, p->name)));
+  } else {
+    return mpca_state(mpca_root(p));
+  }
+}
+
+mpc_parser_t *mpca_grammar_st(const char *grammar, mpca_grammar_st_t *st) {
+  
+  char *err_msg;
+  mpc_parser_t *err_out;
+  mpc_result_t r;
+  mpc_parser_t *GrammarTotal, *Grammar, *Term, *Factor, *Base;
+  
+  GrammarTotal = mpc_new("grammar_total");
+  Grammar = mpc_new("grammar");
+  Term = mpc_new("term");
+  Factor = mpc_new("factor");
+  Base = mpc_new("base");
+  
+  mpc_define(GrammarTotal,
+    mpc_predictive(mpc_total(Grammar, mpc_soft_delete))
+  );
+  
+  mpc_define(Grammar, mpc_and(2, mpcaf_grammar_or,
+    Term,
+    mpc_maybe(mpc_and(2, mpcf_snd_free, mpc_sym("|"), Grammar, free)),
+    mpc_soft_delete
+  ));
+  
+  mpc_define(Term, mpc_many1(mpcaf_grammar_and, Factor));
+  
+  mpc_define(Factor, mpc_and(2, mpcaf_grammar_repeat,
+    Base,
+      mpc_or(6,
+        mpc_sym("*"),
+        mpc_sym("+"),
+        mpc_sym("?"),
+        mpc_sym("!"),
+        mpc_tok_brackets(mpc_int(), free),
+        mpc_pass()),
+    mpc_soft_delete
+  ));
+  
+  mpc_define(Base, mpc_or(5,
+    mpc_apply_to(mpc_tok(mpc_string_lit()), mpcaf_grammar_string, st),
+    mpc_apply_to(mpc_tok(mpc_char_lit()),   mpcaf_grammar_char, st),
+    mpc_apply_to(mpc_tok(mpc_regex_lit()),  mpcaf_grammar_regex, st),
+    mpc_apply_to(mpc_tok_braces(mpc_or(2, mpc_digits(), mpc_ident()), free), mpcaf_grammar_id, st),
+    mpc_tok_parens(Grammar, mpc_soft_delete)
+  ));
+  
+  if(!mpc_parse("<mpc_grammar_compiler>", grammar, GrammarTotal, &r)) {
+    err_msg = mpc_err_string(r.error);
+    err_out = mpc_failf("Invalid Grammar: %s", err_msg);
+    mpc_err_delete(r.error);
+    free(err_msg);
+    r.output = err_out;
+  }
+  
+  mpc_cleanup(5, GrammarTotal, Grammar, Term, Factor, Base);
+  
+  return (st->flags & MPCA_LANG_PREDICTIVE) ? mpc_predictive(r.output) : r.output;
+  
+}
+
+mpc_parser_t *mpca_grammar(int flags, const char *grammar, ...) {
+  mpca_grammar_st_t st;
+  mpc_parser_t *res;
+  va_list va;
+  va_start(va, grammar);
+  
+  st.va = &va;
+  st.parsers_num = 0;
+  st.parsers = NULL;
+  st.flags = flags;
+  
+  res = mpca_grammar_st(grammar, &st);  
+  free(st.parsers);
+  va_end(va);
+  return res;
+}
+
+typedef struct {
+  char *ident;
+  char *name;
+  mpc_parser_t *grammar;
+} mpca_stmt_t;
+
+static mpc_val_t *mpca_stmt_afold(int n, mpc_val_t **xs) {
+  mpca_stmt_t *stmt = malloc(sizeof(mpca_stmt_t));
+  stmt->ident = ((char**)xs)[0];
+  stmt->name = ((char**)xs)[1];
+  stmt->grammar = ((mpc_parser_t**)xs)[3];
+  (void) n;
+  free(((char**)xs)[2]);
+  free(((char**)xs)[4]);
+  
+  return stmt;
+}
+
+static mpc_val_t *mpca_stmt_fold(int n, mpc_val_t **xs) {
+  
+  int i;
+  mpca_stmt_t **stmts = malloc(sizeof(mpca_stmt_t*) * (n+1));
+  
+  for (i = 0; i < n; i++) {
+    stmts[i] = xs[i];
+  }
+  stmts[n] = NULL;  
+  
+  return stmts;
+}
+
+static void mpca_stmt_list_delete(mpc_val_t *x) {
+
+  mpca_stmt_t **stmts = x;
+
+  while(*stmts) {
+    mpca_stmt_t *stmt = *stmts; 
+    free(stmt->ident);
+    free(stmt->name);
+    mpc_soft_delete(stmt->grammar);
+    free(stmt);  
+    stmts++;
+  }
+  free(x);
+
+}
+
+static mpc_val_t *mpca_stmt_list_apply_to(mpc_val_t *x, void *s) {
+
+  mpca_grammar_st_t *st = s;
+  mpca_stmt_t *stmt;
+  mpca_stmt_t **stmts = x;
+  mpc_parser_t *left;
+
+  while(*stmts) {
+    stmt = *stmts;
+    left = mpca_grammar_find_parser(stmt->ident, st);
+    if (st->flags & MPCA_LANG_PREDICTIVE) { stmt->grammar = mpc_predictive(stmt->grammar); }
+    if (stmt->name) { stmt->grammar = mpc_expect(stmt->grammar, stmt->name); }
+    mpc_define(left, stmt->grammar);
+    free(stmt->ident);
+    free(stmt->name);
+    free(stmt);
+    stmts++;
+  }
+  free(x);
+  
+  return NULL;
+}
+
+static mpc_err_t *mpca_lang_st(mpc_input_t *i, mpca_grammar_st_t *st) {
+  
+  mpc_result_t r;
+  mpc_err_t *e;
+  mpc_parser_t *Lang, *Stmt, *Grammar, *Term, *Factor, *Base; 
+  
+  Lang    = mpc_new("lang");
+  Stmt    = mpc_new("stmt");
+  Grammar = mpc_new("grammar");
+  Term    = mpc_new("term");
+  Factor  = mpc_new("factor");
+  Base    = mpc_new("base");
+  
+  mpc_define(Lang, mpc_apply_to(
+    mpc_total(mpc_predictive(mpc_many(mpca_stmt_fold, Stmt)), mpca_stmt_list_delete),
+    mpca_stmt_list_apply_to, st
+  ));
+  
+  mpc_define(Stmt, mpc_and(5, mpca_stmt_afold,
+    mpc_tok(mpc_ident()), mpc_maybe(mpc_tok(mpc_string_lit())), mpc_sym(":"), Grammar, mpc_sym(";"),
+    free, free, free, mpc_soft_delete
+  ));
+  
+  mpc_define(Grammar, mpc_and(2, mpcaf_grammar_or,
+      Term,
+      mpc_maybe(mpc_and(2, mpcf_snd_free, mpc_sym("|"), Grammar, free)),
+      mpc_soft_delete
+  ));
+  
+  mpc_define(Term, mpc_many1(mpcaf_grammar_and, Factor));
+  
+  mpc_define(Factor, mpc_and(2, mpcaf_grammar_repeat,
+    Base,
+      mpc_or(6,
+        mpc_sym("*"),
+        mpc_sym("+"),
+        mpc_sym("?"),
+        mpc_sym("!"),
+        mpc_tok_brackets(mpc_int(), free),
+        mpc_pass()),
+    mpc_soft_delete
+  ));
+  
+  mpc_define(Base, mpc_or(5,
+    mpc_apply_to(mpc_tok(mpc_string_lit()), mpcaf_grammar_string, st),
+    mpc_apply_to(mpc_tok(mpc_char_lit()),   mpcaf_grammar_char, st),
+    mpc_apply_to(mpc_tok(mpc_regex_lit()),  mpcaf_grammar_regex, st),
+    mpc_apply_to(mpc_tok_braces(mpc_or(2, mpc_digits(), mpc_ident()), free), mpcaf_grammar_id, st),
+    mpc_tok_parens(Grammar, mpc_soft_delete)
+  ));
+  
+  
+  if (!mpc_parse_input(i, Lang, &r)) {
+    e = r.error;
+  } else {
+    e = NULL;
+  }
+  
+  mpc_cleanup(6, Lang, Stmt, Grammar, Term, Factor, Base);
+  
+  return e;
+}
+
+mpc_err_t *mpca_lang_file(int flags, FILE *f, ...) {
+  mpca_grammar_st_t st;
+  mpc_input_t *i;
+  mpc_err_t *err;
+
+  va_list va;  
+  va_start(va, f);
+  
+  st.va = &va;
+  st.parsers_num = 0;
+  st.parsers = NULL;
+  st.flags = flags;
+  
+  i = mpc_input_new_file("<mpca_lang_file>", f);
+  err = mpca_lang_st(i, &st);
+  mpc_input_delete(i);
+  
+  free(st.parsers);
+  va_end(va);
+  return err;
+}
+
+mpc_err_t *mpca_lang_pipe(int flags, FILE *p, ...) {
+  mpca_grammar_st_t st;
+  mpc_input_t *i;
+  mpc_err_t *err;
+
+  va_list va;  
+  va_start(va, p);
+  
+  st.va = &va;
+  st.parsers_num = 0;
+  st.parsers = NULL;
+  st.flags = flags;
+  
+  i = mpc_input_new_pipe("<mpca_lang_pipe>", p);
+  err = mpca_lang_st(i, &st);
+  mpc_input_delete(i);
+  
+  free(st.parsers);
+  va_end(va);
+  return err;
+}
+
+mpc_err_t *mpca_lang(int flags, const char *language, ...) {
+  
+  mpca_grammar_st_t st;
+  mpc_input_t *i;
+  mpc_err_t *err;
+  
+  va_list va;  
+  va_start(va, language);
+  
+  st.va = &va;
+  st.parsers_num = 0;
+  st.parsers = NULL;
+  st.flags = flags;
+  
+  i = mpc_input_new_string("<mpca_lang>", language);
+  err = mpca_lang_st(i, &st);
+  mpc_input_delete(i);
+  
+  free(st.parsers);
+  va_end(va);
+  return err;
+}
+
+mpc_err_t *mpca_lang_contents(int flags, const char *filename, ...) {
+  
+  mpca_grammar_st_t st;
+  mpc_input_t *i;
+  mpc_err_t *err;
+  
+  va_list va;
+
+  FILE *f = fopen(filename, "rb");
+  
+  if (f == NULL) {
+    return mpc_err_fail(filename, mpc_state_new(), "Unable to open file!");
+  }
+  
+  va_start(va, filename);
+  
+  st.va = &va;
+  st.parsers_num = 0;
+  st.parsers = NULL;
+  st.flags = flags;
+  
+  i = mpc_input_new_file(filename, f);
+  err = mpca_lang_st(i, &st);
+  mpc_input_delete(i);
+  
+  free(st.parsers);
+  va_end(va);  
+  
+  fclose(f);
+  
+  return err;
+}
