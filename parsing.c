@@ -51,6 +51,13 @@ long eval(mpc_ast_t* t) {
   return x;
 }
 
+// Deckare new lval Struct
+typedef struct {
+  int type;
+  long num;
+  int err;
+} lval;
+
 int main(int argc, char** argv){
 
   mpc_parser_t* Number   = mpc_new("number");
