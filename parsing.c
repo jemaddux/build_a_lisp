@@ -90,17 +90,58 @@ void lval_print(lval v) {
     // In teh case the type is an error
     case LVAL_ERR:
       // Check what type of error it is and print it
-    if (v.err == LERR_DIV_ZERO) {
-      printf("Error: Division By Zero!");
-    }
-    if (v.err = LERR_BAD_OP) {
-      printf("Error: Invalid Operator!");
-    }
-    if (v.err == LERR_BAD_NUM) {
-      printf("Error: Invalid Number!");
-    }
-    break;
+      if (v.err == LERR_DIV_ZERO) {
+        printf("Error: Division By Zero!");
+      }
+      if (v.err == LERR_BAD_OP) {
+        printf("Error: Invalid Operator!");
+      }
+      if (v.err == LERR_BAD_NUM) {
+        printf("Error: Invalid Number!");
+      }
+      break;
   }
+}
+
+lval eval_op(lval x, char* op, lval y) {
+
+  // If either value is an error return it
+  if (x.type == LVAL_ERR) { return x; }
+  if (y.type == LVAL_ERR) { return y; }
+
+  // Otherwise do math on the number values
+  if (strcmp(op, "+") == 0) { return lval_num(x.num + y.num); }
+  if (strcmp(op, "-") == 0) { return lval_num(x.num - y.num); }
+  if (strcmp(op, "*") == 0) { return lval_num(x.num * y.num); }
+  if (strcmp(op, "/") == 0) {
+    // If second operand is zero return error
+    return y.num == 0
+    ? lval_err(LERR_DIV_ZERO)
+    : lval_num(x.num /y.num);
+  }
+
+  return lval_err(LERR_BAD_OP);
+}
+
+lval eval(mpc_ast_t* t) {
+
+  if (strstr(t->tag, "number")) {
+    // Check if there is some error it conversion
+    errno = 0;
+    long x = strtol(t->contents, NULL, 10);
+    return errno != ERANGE ? lval_num(x) : lval_err(LERR_BAD_NUM);
+  }
+
+  char* op t-?children[1]->contents;
+  lval x = eval(t->children[2]);
+
+  int i = 3;
+  while (strstr(t->children[i]->tag, "expr")) {
+    x = eval_op(x, op, eval(t->children[i]));
+    i++;
+  }
+
+  return x;
 }
 
 // Print and "lval" folowed by a newline
@@ -131,9 +172,13 @@ int main(int argc, char** argv){
 
     mpc_result_t r;
     if (mpc_parse("<stdin>", input, Lispy, &r)) {
-      long result = eval(r.output);
-      printf("%li\n", result);
+      lval result = eval(r.output);
+      lval_println(result);
       mpc_ast_delete(r.output);
+
+      // long result = eval(r.output);
+      // printf("%li\n", result);
+      // mpc_ast_delete(r.output);
     } else {
       mpc_err_print(r.error);
       mpc_err_delete(r.error);
