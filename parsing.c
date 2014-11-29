@@ -20,36 +20,11 @@ void add_history(char* unused) {}
 // #include <editline/history.h>
 #endif
 
-// Use opeator string to see which operation to perform
-long eval_op(long x, char* op, long y){
-  if (strcmp(op, "+") == 0) { return x + y; }
-  if (strcmp(op, "-") == 0) { return x - y; }
-  if (strcmp(op, "*") == 0) { return x * y; }
-  if (strcmp(op, "/") == 0) { return x / y; }
-  return 0;
-}
+// Create Enumeration of Possible lval Types
+enum { LVAL_NUM, LVAL_ERR };
 
-long eval(mpc_ast_t* t) {
-  // If tagged as number return it directly
-  if (strstr(t->tag, "number")) {
-    return atoi(t->contents);
-  }
-
-  // The operator is always second child
-  char* op = t->children[1]->contents;
-
-  // We store the third child in 'x'
-  long x = eval(t->children[2]);
-
-  // Iterate the remaining children and combining
-  int i = 3;
-  while (strstr(t->children[i]->tag, "expr")){
-    x = eval_op(x, op, eval(t->children[i]));
-    i++;
-  }
-
-  return x;
-}
+// Create enumeration of Possible Error Types
+enum { LERR_DIV_ZERO, LERR_BAD_OP, LERR_BAD_NUM };
 
 // Deckare new lval Struct
 typedef struct {
@@ -57,12 +32,6 @@ typedef struct {
   long num;
   int err;
 } lval;
-
-// Create Enumeration of Possible lval Types
-enum { LVAL_NUM, LVAL_ERR };
-
-// Create enumeration of Possible Error Types
-enum { LERR_DIV_ZERO, LERR_BAD_OP, LERR_BAD_NUM };
 
 //  Create a new number type lval
 lval lval_num(long x) {
@@ -99,9 +68,12 @@ void lval_print(lval v) {
       if (v.err == LERR_BAD_NUM) {
         printf("Error: Invalid Number!");
       }
-      break;
+    break;
   }
 }
+
+// Print and "lval" folowed by a newline
+void lval_println(lval v) { lval_print(v); putchar('\n'); }
 
 lval eval_op(lval x, char* op, lval y) {
 
@@ -132,7 +104,7 @@ lval eval(mpc_ast_t* t) {
     return errno != ERANGE ? lval_num(x) : lval_err(LERR_BAD_NUM);
   }
 
-  char* op t-?children[1]->contents;
+  char* op = t->children[1]->contents;
   lval x = eval(t->children[2]);
 
   int i = 3;
@@ -143,9 +115,6 @@ lval eval(mpc_ast_t* t) {
 
   return x;
 }
-
-// Print and "lval" folowed by a newline
-void lval_println(lval v) { lval_print(v); putchat('/n'); }
 
 int main(int argc, char** argv){
 
@@ -163,10 +132,11 @@ int main(int argc, char** argv){
     ",
     Number, Operator, Expr, Lispy);
 
-  puts("Lispy Version 0.0.0.0.2");
+  puts("Lispy Version 0.0.0.0.4");
   puts("Press Ctrl-c to Exit\n");
 
   while (1){
+
     char* input = readline("lispy> ");
     add_history(input);
 
@@ -175,10 +145,6 @@ int main(int argc, char** argv){
       lval result = eval(r.output);
       lval_println(result);
       mpc_ast_delete(r.output);
-
-      // long result = eval(r.output);
-      // printf("%li\n", result);
-      // mpc_ast_delete(r.output);
     } else {
       mpc_err_print(r.error);
       mpc_err_delete(r.error);
