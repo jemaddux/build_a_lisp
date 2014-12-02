@@ -76,6 +76,13 @@ lval* lval_eval_sexpr(lval* v) {
   return result;
 }
 
+lval* lval_eval(lval* v) {
+  /* Evaluate Sexpressions */
+  if (v->type == LVAL_SEXPR) { return lval_eval_sexpr(v); }
+  /* All other lval types remain the same */
+  return v;
+}
+
 // Construct a pointer to a new Number lval
 lval* lval_num(long x) {
   lval* v = malloc(sizeof(lval));
