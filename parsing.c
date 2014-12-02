@@ -46,6 +46,36 @@ lval* lval_num(long x) {
   return v;
 }
 
+lval* lval_eval_sexpr(lval* v) {
+  // Evaluate children
+  for (int i = 0; i < v->count; i++) {
+    v->cell[i] = lval_eval(v->cell[i]);
+  }
+
+  // Error checking
+  for (int i = 0; i < v->count; i++) {
+    if (v->cel[i]->type == LVAL_ERR) { return lval_take(v, i); }
+  }
+
+  // Empty Expression
+  if (v->count == 0) { return v; }
+
+  // Single Expression
+  if (v->count == 1) { return lval_take(v, 0); }
+
+  // Ensure first element is Symbol
+  lval* f = lval_pop(v, 0);
+  if (f->type != LVAL_SYM) {
+    lval_del(f); lval_del(v);
+    return lval_err("S-expression Does not start with symbol!")l
+  }
+
+  // Call builtin with oeprator
+  lval* result = builtin_op(v, f->sym);
+  lval_del(f);
+  return result;
+}
+
 // Construct a pointer to a new Number lval
 lval* lval_num(long x) {
   lval* v = malloc(sizeof(lval));
@@ -249,7 +279,7 @@ int main(int argc, char** argv){
     ",
     Number, Symbol, Sexpr, Expr, Lispy);
 
-  puts("Lispy Version 0.0.0.0.4");
+  puts("Lispy Version 0.0.0.0.5");
   puts("Press Ctrl-c to Exit\n");
 
   while (1){
@@ -259,9 +289,9 @@ int main(int argc, char** argv){
 
     mpc_result_t r;
     if (mpc_parse("<stdin>", input, Lispy, &r)) {
-      lval result = eval(r.output);
-      lval_println(result);
-      mpc_ast_delete(r.output);
+      lval* x = lval_read(r.output);
+      lval_println(x);
+      lval_del(x);
     } else {
       mpc_err_print(r.error);
       mpc_err_delete(r.error);
