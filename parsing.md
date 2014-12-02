@@ -17,3 +17,7 @@ a*        Zero or more of the cahracter a are required
 ^         The start of input is required
 $         The end of input is required
 
+
+
+cc -std=c99 -Wall parsing.c mpc.c -ledit -lm -o parsing
+
